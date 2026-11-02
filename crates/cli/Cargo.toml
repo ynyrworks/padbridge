@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 padbridge-protocol = { path = "../protocol" }
+padbridge-usbmux = { path = "../usbmux" }

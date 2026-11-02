@@ -5,7 +5,7 @@
 - **Display 模式**：iPad 當 Windows 的擴充螢幕，支援觸控與 Apple Pencil。
 - **Mirror 模式**：iPad 畫面顯示在 Windows 視窗中。
 
-> 🚧 開發中，目前只有線路協定（M0）。架構與里程碑見 [docs/DESIGN.md](docs/DESIGN.md)。
+> 🚧 開發中：已完成線路協定（M0）、USB usbmux 通道（M1）與 iOS 骨架（M2）。架構與里程碑見 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 需求（規劃中）
 
@@ -27,8 +27,18 @@ iOS 端（不需要 Mac）：
 3. 開啟 App 並允許「區域網路」權限，再從 Windows 測試連線：
 
 ```bash
+cargo run -p padbridge-cli -- devices
+```
+
+```bash
+cargo run -p padbridge-cli -- ping usb
+```
+
+```bash
 cargo run -p padbridge-cli -- ping <iPad 的 IP>
 ```
+
+`devices` 會列出透過 USB 連接的 iPad，`watch` 會持續顯示插拔事件；`ping usb:47801` 則測試 Mirror 模式的廣播擴充。
 
 有 Mac 的話，可以在 `ios/` 執行 `xcodegen generate`，再用 Xcode 開啟。
 

@@ -9,14 +9,14 @@ jobs:
   rust:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
   ios:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Swift package tests (protocol + networking, on macOS)
         working-directory: ios/PadBridgeKit
@@ -47,7 +47,7 @@ jobs:
           test -d Payload/PadBridge.app/PlugIns/PadBridgeBroadcast.appex
           zip -qry PadBridge-unsigned.ipa Payload
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: PadBridge-unsigned-ipa
           path: ios/build/PadBridge-unsigned.ipa

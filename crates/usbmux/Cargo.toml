@@ -1,0 +1,10 @@
+[package]
+name = "padbridge-usbmux"
+description = "Minimal usbmuxd client: list iOS devices and open TCP tunnels to them over USB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+plist = "1"
