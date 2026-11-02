@@ -86,7 +86,9 @@ impl MirrorDecoder {
         yuv.write_rgba8(&mut self.rgba);
         let pixels: Vec<u32> = self
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]))
             .collect();
         let (width, height, pixels) = rotate(width, height, pixels, rotation);

@@ -35,10 +35,10 @@ public final class MirrorStreamer: @unchecked Sendable {
         // keyframe: re-encode the last one.
         server.onKeyframeNeeded = { [weak self] in
             guard let self else { return }
-            encoder.requestKeyframe()
-            queue.async { [self] in
-                guard let lastFrame else { return }
-                try? encoder.encode(lastFrame.buffer, pts: CMClockGetTime(CMClockGetHostTimeClock()), rotation: lastFrame.rotation)
+            self.encoder.requestKeyframe()
+            self.queue.async {
+                guard let last = self.lastFrame else { return }
+                try? self.encoder.encode(last.buffer, pts: CMClockGetTime(CMClockGetHostTimeClock()), rotation: last.rotation)
             }
         }
     }
