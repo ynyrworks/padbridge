@@ -21,11 +21,13 @@ pub struct DisplaySettings {
     pub max_width: usize,
     /// Inject the iPad's touches, Pencil and trackpad input into Windows.
     pub allow_input: bool,
+    /// Prefer the GPU (scaling + hardware encoder); falls back to software automatically.
+    pub hardware: bool,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        Self { monitor: 0, max_fps: 60, bitrate_kbps: 10_000, max_width: 1920, allow_input: true }
+        Self { monitor: 0, max_fps: 60, bitrate_kbps: 10_000, max_width: 1920, allow_input: true, hardware: true }
     }
 }
 
@@ -34,11 +36,10 @@ pub struct ScreenImage<'a> {
     pub width: usize,
     pub height: usize,
     pub bgra: &'a [u8],
-    /// Cursor hot spot in image coordinates, if visible.
-    pub cursor: Option<(i32, i32)>,
 }
 
-/// Scales, draws the cursor and H.264-encodes desktop images into protocol messages.
+/// Scales and H.264-encodes desktop images into protocol messages (software path).
+/// The cursor is not drawn in: the iPad draws it from `Cursor` messages.
 pub struct VideoPipeline {
     settings: DisplaySettings,
     encoder: Encoder,
@@ -80,11 +81,6 @@ impl VideoPipeline {
     pub fn encode(&mut self, image: &ScreenImage) -> Result<Vec<Message>, BoxError> {
         let (w, h) = self.output_size(image.width, image.height);
         resize_bgra(image.bgra, image.width, image.height, &mut self.scaled, w, h);
-        if let Some((x, y)) = image.cursor {
-            let sx = (x as f64 * w as f64 / image.width as f64) as i32;
-            let sy = (y as f64 * h as f64 / image.height as f64) as i32;
-            draw_cursor(&mut self.scaled, w, h, sx, sy);
-        }
         let yuv = match &mut self.yuv {
             Some(yuv) if yuv_dimensions(yuv) == (w, h) => yuv,
             slot => slot.insert(YUVBuffer::new(w, h)),
@@ -210,46 +206,6 @@ fn resize_area(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: 
     }
 }
 
-/// Desktop Duplication delivers the desktop without the cursor, so draw a
-/// plain arrow at the hot spot. `X` = outline, `.` = fill.
-const ARROW: [&str; 17] = [
-    "X",
-    "XX",
-    "X.X",
-    "X..X",
-    "X...X",
-    "X....X",
-    "X.....X",
-    "X......X",
-    "X.......X",
-    "X........X",
-    "X.....XXXXX",
-    "X..X..X",
-    "X.X X..X",
-    "XX  X..X",
-    "X    X..X",
-    "     X..X",
-    "      XX",
-];
-
-pub fn draw_cursor(bgra: &mut [u8], width: usize, height: usize, x: i32, y: i32) {
-    for (row, line) in ARROW.iter().enumerate() {
-        for (col, ch) in line.bytes().enumerate() {
-            let value = match ch {
-                b'X' => 0,
-                b'.' => 255,
-                _ => continue,
-            };
-            let (px, py) = (x + col as i32, y + row as i32);
-            if px < 0 || py < 0 || px as usize >= width || py as usize >= height {
-                continue;
-            }
-            let i = (py as usize * width + px as usize) * 4;
-            bgra[i..i + 3].fill(value);
-        }
-    }
-}
-
 #[cfg(windows)]
 pub use session::{run_display, DisplayEvent};
 
@@ -267,6 +223,7 @@ mod session {
 
     use super::{DisplaySettings, VideoPipeline};
     use crate::capture::Capturer;
+    use crate::hwenc::HardwareEncoder;
     use crate::input::{Injector, InputMapper, ScreenRect};
 
     #[derive(Debug, Clone, PartialEq)]
@@ -274,10 +231,31 @@ mod session {
         Connected { name: String },
         /// The iPad's screen.
         Screen { width_px: u32, height_px: u32, max_fps: u16 },
-        Streaming { monitor: String, width: usize, height: usize },
+        Streaming { monitor: String, width: usize, height: usize, encoder: String },
         Stats { fps: f64, kbps: f64, encode_ms: f64 },
         Log(String),
         Ended(String),
+    }
+
+    enum Encoder {
+        Hardware(Box<HardwareEncoder>),
+        Software(Box<VideoPipeline>),
+    }
+
+    impl Encoder {
+        fn name(&self) -> String {
+            match self {
+                Encoder::Hardware(e) => format!("硬體：{}", e.name()),
+                Encoder::Software(_) => "軟體：OpenH264".into(),
+            }
+        }
+
+        fn force_keyframe(&mut self) {
+            match self {
+                Encoder::Hardware(e) => e.force_keyframe(),
+                Encoder::Software(p) => p.force_keyframe(),
+            }
+        }
     }
 
     /// Streams a monitor to the iPad until it disconnects, an error occurs,
@@ -296,6 +274,34 @@ mod session {
         on_event(DisplayEvent::Ended(reason));
     }
 
+    /// Waits for the first desktop image so its size is known.
+    fn first_image(capturer: &mut Capturer) -> Result<(), crate::BoxError> {
+        for _ in 0..50 {
+            if capturer.poll(100)?.image {
+                return Ok(());
+            }
+        }
+        Err("擷取不到螢幕畫面".into())
+    }
+
+    /// Hardware encoding when available, otherwise software with CPU readback.
+    fn open_encoder(
+        settings: &DisplaySettings,
+        on_event: &mut impl FnMut(DisplayEvent),
+    ) -> Result<(Capturer, Encoder), crate::BoxError> {
+        if settings.hardware {
+            let mut capturer = Capturer::new(settings.monitor, false)?;
+            first_image(&mut capturer)?;
+            match HardwareEncoder::new(capturer.device(), capturer.size(), settings.clone()) {
+                Ok(encoder) => return Ok((capturer, Encoder::Hardware(Box::new(encoder)))),
+                Err(e) => on_event(DisplayEvent::Log(format!("無法使用硬體編碼，改用軟體編碼：{e}"))),
+            }
+        }
+        let mut capturer = Capturer::new(settings.monitor, true)?;
+        first_image(&mut capturer)?;
+        Ok((capturer, Encoder::Software(Box::new(VideoPipeline::new(settings.clone())?))))
+    }
+
     fn stream_display(
         stream: TcpStream,
         host_name: &str,
@@ -304,9 +310,14 @@ mod session {
         on_event: &mut impl FnMut(DisplayEvent),
     ) -> Result<String, crate::BoxError> {
         let mut writer = stream.try_clone()?;
-        writer.write_all(&Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() }.to_frame()?)?;
+        let send = |writer: &mut TcpStream, message: &Message| -> Result<usize, crate::BoxError> {
+            let frame = message.to_frame()?;
+            writer.write_all(&frame)?;
+            Ok(frame.len())
+        };
+        send(&mut writer, &Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() })?;
 
-        let mut capturer = Capturer::new(settings.monitor)?;
+        let (mut capturer, mut encoder) = open_encoder(&settings, on_event)?;
         let monitor = capturer.monitor().label();
         let input_rect = settings.allow_input.then(|| {
             let m = capturer.monitor();
@@ -317,16 +328,17 @@ mod session {
         let (events_tx, events_rx) = mpsc::channel();
         let reader_keyframe = want_keyframe.clone();
         thread::spawn(move || read_peer(stream, reader_keyframe, input_rect, events_tx));
+
         let interval = Duration::from_secs_f64(1.0 / f64::from(settings.max_fps.max(1)));
-        let mut pipeline = VideoPipeline::new(settings)?;
         let mut announced = None;
-        let mut dirty = false;
+        let mut sent_cursor = None;
+        let mut dirty = true;
         let mut next_send = Instant::now();
         let (mut frames, mut bytes, mut encode_time, mut window) = (0u32, 0usize, Duration::ZERO, Instant::now());
 
         loop {
             if stop.load(Ordering::Relaxed) {
-                let _ = writer.write_all(&Message::Bye.to_frame()?);
+                let _ = send(&mut writer, &Message::Bye);
                 return Ok("已停止".into());
             }
             while let Ok(event) = events_rx.try_recv() {
@@ -337,34 +349,55 @@ mod session {
             }
 
             let wait = next_send.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
-            dirty |= capturer.poll(wait.as_millis().min(100) as u32)?;
+            dirty |= capturer.poll(wait.as_millis().min(100) as u32)?.image;
+
+            // The iPad draws the cursor itself, so moving it costs no video frame.
+            let (width, height) = capturer.size();
+            let cursor = capturer.cursor();
+            if sent_cursor != Some(cursor) && width > 0 {
+                let message = match cursor {
+                    Some((x, y)) => Message::Cursor { x: x as f32 / width as f32, y: y as f32 / height as f32, visible: true },
+                    None => Message::Cursor { x: 0.0, y: 0.0, visible: false },
+                };
+                if send(&mut writer, &message).is_err() {
+                    return Ok("連線中斷".into());
+                }
+                sent_cursor = Some(cursor);
+            }
+
             if want_keyframe.swap(false, Ordering::Relaxed) {
-                pipeline.force_keyframe();
+                encoder.force_keyframe();
                 dirty = true;
             }
             if !dirty || Instant::now() < next_send {
                 continue;
             }
-            let Some(image) = capturer.last_frame() else { continue };
-            let image = super::ScreenImage {
-                width: image.width,
-                height: image.height,
-                bgra: image.bgra,
-                cursor: image.cursor,
-            };
+
             let started = Instant::now();
-            let messages = pipeline.encode(&image)?;
+            let (messages, size) = match &mut encoder {
+                Encoder::Hardware(hw) => {
+                    if hw.input_size() != capturer.size() {
+                        // Resolution changed: rebuild the GPU pipeline for the new size.
+                        **hw = HardwareEncoder::new(capturer.device(), capturer.size(), settings.clone())?;
+                    }
+                    let Some(texture) = capturer.texture() else { continue };
+                    (hw.encode(texture)?, hw.output_size())
+                }
+                Encoder::Software(pipeline) => {
+                    let Some(image) = capturer.last_frame() else { continue };
+                    let image = super::ScreenImage { width: image.width, height: image.height, bgra: image.bgra };
+                    (pipeline.encode(&image)?, pipeline.output_size(image.width, image.height))
+                }
+            };
             encode_time += started.elapsed();
-            let size = pipeline.output_size(image.width, image.height);
             if announced != Some(size) {
-                on_event(DisplayEvent::Streaming { monitor: monitor.clone(), width: size.0, height: size.1 });
+                on_event(DisplayEvent::Streaming { monitor: monitor.clone(), width: size.0, height: size.1, encoder: encoder.name() });
                 announced = Some(size);
             }
             for message in &messages {
-                let frame = message.to_frame()?;
-                bytes += frame.len();
-                if writer.write_all(&frame).is_err() {
-                    return Ok("連線中斷".into());
+                match send(&mut writer, message) {
+                    Ok(n) => bytes += n,
+                    Err(_) => return Ok("連線中斷".into()),
                 }
             }
             frames += 1;
@@ -492,7 +525,7 @@ mod tests {
         let t = Instant::now();
         for i in 0..10 {
             let frame = gradient(1920, 1080, i);
-            pipeline.encode(&ScreenImage { width: 1920, height: 1080, bgra: &frame, cursor: None }).unwrap();
+            pipeline.encode(&ScreenImage { width: 1920, height: 1080, bgra: &frame }).unwrap();
         }
         println!("pipeline 1920x1080 (incl. test-frame generation): {:.1} ms", t.elapsed().as_secs_f64() * 100.0);
     }
@@ -528,15 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_is_drawn_and_clipped() {
-        let mut bgra = vec![128u8; 20 * 20 * 4];
-        draw_cursor(&mut bgra, 20, 20, 2, 3);
-        assert_eq!(&bgra[(3 * 20 + 2) * 4..][..3], &[0, 0, 0], "hot spot is outline");
-        assert_eq!(&bgra[(5 * 20 + 3) * 4..][..3], &[255, 255, 255], "inside is filled");
-        draw_cursor(&mut bgra, 20, 20, 15, 15); // partly off-screen: must not panic
-    }
-
-    #[test]
     fn encodes_scaled_stream_the_viewer_can_decode() {
         let settings = DisplaySettings { max_width: 640, ..DisplaySettings::default() };
         let mut pipeline = VideoPipeline::new(settings).unwrap();
@@ -544,7 +568,7 @@ mod tests {
         let (w, h) = (1280, 720);
 
         let first = gradient(w, h, 0);
-        let messages = pipeline.encode(&ScreenImage { width: w, height: h, bgra: &first, cursor: Some((100, 100)) }).unwrap();
+        let messages = pipeline.encode(&ScreenImage { width: w, height: h, bgra: &first }).unwrap();
         assert!(matches!(messages[0], Message::StreamConfig { width: 640, height: 360, .. }));
         assert!(matches!(messages[1], Message::CodecParams { .. }));
         assert!(matches!(messages[2], Message::VideoFrame { keyframe: true, .. }));
@@ -556,12 +580,12 @@ mod tests {
         assert_eq!((frame.width, frame.height), (640, 360));
 
         let second = gradient(w, h, 7);
-        let messages = pipeline.encode(&ScreenImage { width: w, height: h, bgra: &second, cursor: None }).unwrap();
+        let messages = pipeline.encode(&ScreenImage { width: w, height: h, bgra: &second }).unwrap();
         assert!(matches!(messages.as_slice(), [Message::VideoFrame { keyframe: false, .. }]));
         assert!(decoder.handle(&messages[0]).unwrap().is_some());
 
         pipeline.force_keyframe();
-        let messages = pipeline.encode(&ScreenImage { width: w, height: h, bgra: &second, cursor: None }).unwrap();
+        let messages = pipeline.encode(&ScreenImage { width: w, height: h, bgra: &second }).unwrap();
         assert!(matches!(messages.last(), Some(Message::VideoFrame { keyframe: true, .. })));
     }
 }

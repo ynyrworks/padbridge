@@ -43,7 +43,7 @@ struct ContentView: View {
             }
 
             if display.streamInfo != nil {
-                VideoLayerView(layer: display.receiver.layer, videoSize: display.streamSize) { message in
+                VideoLayerView(layer: display.receiver.layer, cursor: display.cursorLayer, videoSize: display.streamSize) { message in
                     display.sendPointer(message)
                 }
                 .ignoresSafeArea()
@@ -57,10 +57,55 @@ struct ContentView: View {
     }
 }
 
+/// The host's mouse cursor, drawn over the video (the host does not render it
+/// into frames, so moving it costs no bandwidth). Its tip is the hot spot.
+final class CursorLayer: CAShapeLayer {
+    /// Where the video is drawn inside the view; set by the hosting view.
+    var contentRect = CGRect.zero { didSet { reposition() } }
+    private var normalized = CGPoint.zero
+
+    override init() {
+        super.init()
+        let arrow = CGMutablePath()
+        arrow.addLines(between: [CGPoint(x: 0, y: 0), CGPoint(x: 0, y: 17), CGPoint(x: 4.5, y: 13),
+                                 CGPoint(x: 7.5, y: 19.5), CGPoint(x: 10, y: 18.5), CGPoint(x: 7, y: 12),
+                                 CGPoint(x: 12.5, y: 12)])
+        arrow.closeSubpath()
+        path = arrow
+        fillColor = UIColor.white.cgColor
+        strokeColor = UIColor.black.cgColor
+        lineWidth = 1.2
+        anchorPoint = .zero
+        bounds = CGRect(x: 0, y: 0, width: 13, height: 20)
+        zPosition = 10
+        isHidden = true
+    }
+
+    override init(layer: Any) { super.init(layer: layer) }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// Call on the main thread.
+    func update(x: Float, y: Float, visible: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        normalized = CGPoint(x: CGFloat(x), y: CGFloat(y))
+        isHidden = !visible
+        reposition()
+        CATransaction.commit()
+    }
+
+    private func reposition() {
+        position = CGPoint(x: contentRect.minX + normalized.x * contentRect.width,
+                           y: contentRect.minY + normalized.y * contentRect.height)
+    }
+}
+
 /// Hosts the receiver's display layer, sized to fill the view, and turns
 /// touches, Apple Pencil and trackpad input on it into `Pointer` messages.
 struct VideoLayerView: UIViewRepresentable {
     let layer: AVSampleBufferDisplayLayer
+    let cursor: CursorLayer
     let videoSize: CGSize
     let onPointer: (Message) -> Void
 
@@ -68,10 +113,18 @@ struct VideoLayerView: UIViewRepresentable {
         var videoLayer: CALayer? {
             didSet {
                 oldValue?.removeFromSuperlayer()
-                if let videoLayer { layer.addSublayer(videoLayer) }
+                if let videoLayer { layer.insertSublayer(videoLayer, at: 0) }
             }
         }
-        var videoSize: CGSize = .zero
+        var cursorLayer: CursorLayer? {
+            didSet {
+                oldValue?.removeFromSuperlayer()
+                if let cursorLayer { layer.addSublayer(cursorLayer) }
+            }
+        }
+        var videoSize: CGSize = .zero {
+            didSet { setNeedsLayout() }
+        }
         var onPointer: ((Message) -> Void)?
 
         /// Protocol ids for the touches currently down.
@@ -92,6 +145,7 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             videoLayer?.frame = bounds
+            cursorLayer?.contentRect = PointerMapping.contentRect(videoSize: videoSize, in: bounds)
             CATransaction.commit()
         }
 
@@ -169,11 +223,13 @@ struct VideoLayerView: UIViewRepresentable {
         let view = HostView()
         view.backgroundColor = .black
         view.videoLayer = layer
+        view.cursorLayer = cursor
         return view
     }
 
     func updateUIView(_ view: HostView, context: Context) {
         if view.videoLayer !== layer { view.videoLayer = layer }
+        if view.cursorLayer !== cursor { view.cursorLayer = cursor }
         view.videoSize = videoSize
         view.onPointer = onPointer
     }

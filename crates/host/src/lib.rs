@@ -4,6 +4,8 @@
 pub mod capture;
 pub mod discovery;
 pub mod display;
+#[cfg(windows)]
+pub mod hwenc;
 pub mod input;
 pub mod mirror;
 pub mod session;

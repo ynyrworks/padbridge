@@ -421,8 +421,8 @@ impl PadBridgeApp {
                     DisplayEvent::Screen { width_px, height_px, max_fps } => {
                         s.screen = Some(format!("iPad {width_px}×{height_px} · {max_fps} Hz"));
                     }
-                    DisplayEvent::Streaming { monitor, width, height } => {
-                        s.streaming = Some(format!("{monitor}\n傳送解析度 {width}×{height}"));
+                    DisplayEvent::Streaming { monitor, width, height, encoder } => {
+                        s.streaming = Some(format!("{monitor}\n傳送解析度 {width}×{height} · {encoder}"));
                     }
                     DisplayEvent::Stats { fps, kbps, encode_ms } => {
                         s.stats = Some(format!("{fps:.0} fps · {:.1} Mbps · 編碼 {encode_ms:.1} ms", kbps / 1000.0));

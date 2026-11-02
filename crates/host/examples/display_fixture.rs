@@ -19,8 +19,7 @@ fn main() {
                 bgra[i..i + 4].copy_from_slice(&[((x + frame * 10) % 256) as u8, (y % 256) as u8, 128, 255]);
             }
         }
-        let cursor = Some((40 + frame as i32 * 5, 60));
-        for message in pipeline.encode(&ScreenImage { width: w, height: h, bgra: &bgra, cursor }).expect("encode") {
+        for message in pipeline.encode(&ScreenImage { width: w, height: h, bgra: &bgra }).expect("encode") {
             message.encode(&mut out).expect("frame");
         }
     }

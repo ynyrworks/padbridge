@@ -23,6 +23,7 @@ enum Kind {
     static let videoFrame: UInt8 = 0x11
     static let requestKeyframe: UInt8 = 0x12
     static let pointer: UInt8 = 0x20
+    static let cursor: UInt8 = 0x21
     static let ping: UInt8 = 0x30
     static let pong: UInt8 = 0x31
     static let log: UInt8 = 0x40
@@ -56,6 +57,8 @@ public enum Message: Equatable, Sendable {
     /// `x`/`y` are normalized to the video frame (0...1); angles are radians.
     case pointer(id: UInt32, kind: PointerKind, phase: Phase, x: Float, y: Float,
                  pressure: Float, altitude: Float, azimuth: Float)
+    /// Host cursor in normalized video coordinates; the receiver draws it.
+    case cursor(x: Float, y: Float, visible: Bool)
     case ping(nonce: UInt64, tUs: UInt64)
     case pong(nonce: UInt64, tUs: UInt64)
     case log(level: UInt8, text: String)
@@ -83,6 +86,7 @@ extension Message {
         case .videoFrame: Kind.videoFrame
         case .requestKeyframe: Kind.requestKeyframe
         case .pointer: Kind.pointer
+        case .cursor: Kind.cursor
         case .ping: Kind.ping
         case .pong: Kind.pong
         case .log: Kind.log
@@ -145,6 +149,10 @@ extension Message {
             w.u8(kind.rawValue)
             w.u8(phase.rawValue)
             for v in [x, y, pressure, altitude, azimuth] { w.u32(v.bitPattern) }
+        case let .cursor(x, y, visible):
+            w.u32(x.bitPattern)
+            w.u32(y.bitPattern)
+            w.u8(visible ? 1 : 0)
         case let .ping(nonce, tUs), let .pong(nonce, tUs):
             w.u64(nonce)
             w.u64(tUs)
@@ -188,6 +196,8 @@ extension Message {
             message = .pointer(id: try r.u32(), kind: try r.enumValue(), phase: try r.enumValue(),
                                x: try r.f32(), y: try r.f32(), pressure: try r.f32(),
                                altitude: try r.f32(), azimuth: try r.f32())
+        case Kind.cursor:
+            message = .cursor(x: try r.f32(), y: try r.f32(), visible: try r.u8() != 0)
         case Kind.ping:
             message = .ping(nonce: try r.u64(), tUs: try r.u64())
         case Kind.pong:

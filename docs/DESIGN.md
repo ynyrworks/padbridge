@@ -71,6 +71,7 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 | 0x11 | VideoFrame | pts_us u64 · flags u8(bit0=keyframe, bit1-2=順時針旋轉 90° 次數) · AVCC NALs 至訊框結尾 |
 | 0x12 | RequestKeyframe | — |
 | 0x20 | Pointer | id u32 · kind u8 · phase u8 · x f32 · y f32 · pressure f32 · altitude f32 · azimuth f32 |
+| 0x21 | Cursor | x f32 · y f32 · visible u8（正規化影像座標，由接收端繪製游標） |
 | 0x30 | Ping | nonce u64 · t_us u64 |
 | 0x31 | Pong | nonce u64 · t_us u64（原樣回傳） |
 | 0x40 | Log | level u8 · text str |
@@ -124,10 +125,20 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
   - 1440p → 1080p：約 38 fps，每幀編碼約 24 ms。
   - 4K → 1080p：約 18 fps，每幀約 57 ms。
   - 瓶頸是 CPU 縮放、讀回 4K 畫面、OpenH264 軟體編碼。
-- 待辦：
-  - 用 GPU 縮放（D3D11 Video Processor）後再讀回。
-  - 改用 Media Foundation 或 NVENC 硬體編碼。
-  - 讓 iPad 支援 High profile 與 HEVC。
+- 待辦：讓 iPad 支援 High profile 與 HEVC。
+
+### 4.4 硬體編碼
+
+- `hwenc::HardwareEncoder`：
+  - Desktop Duplication 的貼圖先複製成自己的 GPU 貼圖（因為釋放幀之後原本的貼圖就失效），再用 D3D11 Video Processor 縮放並轉成 NV12。
+  - 準備 4 張 NV12 貼圖輪流使用，避免非同步編碼器還在讀的時候被覆寫。
+  - 用 `MFTEnumEx` 找出硬體 H.264 MFT，透過 `IMFDXGIDeviceManager` 共用同一個 D3D11 裝置，以非同步事件迴圈（NeedInput / HaveOutput）驅動。
+  - 用 `ICodecAPI` 設定低延遲、CBR、無 B-frame、強制關鍵幀。
+  - 目前輸出 Constrained Baseline，讓 OpenH264（Windows 端工具與測試）也能解碼。
+- 擷取裝置以 `VIDEO_SUPPORT` 建立並開啟 multithread protection，因為 Media Foundation 會在自己的執行緒使用它。
+- 找不到硬體編碼器時，自動改用 CPU 讀回加 OpenH264。
+- 游標改用 `Cursor` 訊息送到 iPad，由 iPad 繪製（`CursorLayer`），所以只有游標移動時不用重新編碼。
+- 基準測試：`cargo test --release -p padbridge-host bench_hardware -- --ignored --nocapture`。在 RTX 5080 上，4K → 1080p 每幀 1.94 ms，1440p → 1080p 每幀 1.93 ms。
 
 ### 4.3 觸控回傳實作（M5）
 

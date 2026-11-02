@@ -22,6 +22,7 @@ final class DisplayService: ObservableObject {
     @Published private(set) var streamSize: CGSize = .zero
 
     let receiver = VideoReceiver()
+    let cursorLayer = CursorLayer()
     private var server: Server?
 
     func start() {
@@ -29,6 +30,7 @@ final class DisplayService: ObservableObject {
         let server = Server(role: .displaySink, name: UIDevice.current.name, port: Wire.displayPort)
         let info = Self.displayInfo()
         let receiver = receiver
+        let cursorLayer = cursorLayer
         receiver.onNeedKeyframe = { [weak server] in server?.broadcast(.requestKeyframe) }
         server.onEvent = { [weak self] event in
             // Runs on the server queue: reply and feed video here, hop to the main actor for UI.
@@ -40,6 +42,10 @@ final class DisplayService: ObservableObject {
                 case .codecParams, .videoFrame:
                     receiver.handle(message)
                     return
+                case let .cursor(x, y, visible):
+                    // Frequent: update the layer directly instead of going through SwiftUI.
+                    DispatchQueue.main.async { cursorLayer.update(x: x, y: y, visible: visible) }
+                    return
                 case .streamConfig:
                     receiver.handle(message)
                 default:
@@ -47,6 +53,7 @@ final class DisplayService: ObservableObject {
                 }
             case .disconnected:
                 receiver.reset()
+                DispatchQueue.main.async { cursorLayer.update(x: 0, y: 0, visible: false) }
             default:
                 break
             }

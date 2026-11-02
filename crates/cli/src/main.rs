@@ -143,7 +143,7 @@ fn display(target: &str, monitor: usize) -> CliResult {
     run_display(stream, &host_name(), settings, &stop, |event| match event {
         DisplayEvent::Connected { name } => println!("已連上 {name}"),
         DisplayEvent::Screen { width_px, height_px, max_fps } => println!("iPad 螢幕 {width_px}×{height_px} @{max_fps} Hz"),
-        DisplayEvent::Streaming { width, height, .. } => println!("串流 {width}×{height}"),
+        DisplayEvent::Streaming { width, height, encoder, .. } => println!("串流 {width}×{height}（{encoder}）"),
         DisplayEvent::Stats { fps, kbps, encode_ms } => {
             print!("\r{fps:5.1} fps · {:6.2} Mbps · 編碼 {encode_ms:5.1} ms   ", kbps / 1000.0);
             let _ = std::io::stdout().flush();

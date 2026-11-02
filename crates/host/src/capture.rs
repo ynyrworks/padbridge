@@ -7,9 +7,10 @@ use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
@@ -111,42 +112,54 @@ pub struct CapturedFrame<'a> {
     pub cursor: Option<(i32, i32)>,
 }
 
+/// What a [`Capturer::poll`] observed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub image: bool,
+    pub cursor: bool,
+}
+
+impl Changes {
+    pub fn any(self) -> bool {
+        self.image || self.cursor
+    }
+}
+
 pub struct Capturer {
     monitor: Monitor,
     output: IDXGIOutput1,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
+    /// Copy every image to system memory (software encoding) or keep it on the GPU.
+    cpu_readback: bool,
     staging: Option<ID3D11Texture2D>,
     bgra: Vec<u8>,
+    /// GPU copy of the latest image; Desktop Duplication's own texture is only
+    /// valid until the frame is released.
+    gpu_copy: Option<ID3D11Texture2D>,
     width: usize,
     height: usize,
     cursor: Option<(i32, i32)>,
 }
 
 impl Capturer {
-    pub fn new(monitor_index: usize) -> Result<Self, BoxError> {
+    /// `cpu_readback`: provide images as BGRA bytes ([`Self::last_frame`]) as well
+    /// as on the GPU ([`Self::texture`]).
+    pub fn new(monitor_index: usize, cpu_readback: bool) -> Result<Self, BoxError> {
         let (adapter, output, monitor) = outputs()?
             .into_iter()
             .nth(monitor_index)
             .ok_or_else(|| format!("找不到第 {monitor_index} 個螢幕"))?;
-        let mut device = None;
-        let mut context = None;
-        unsafe {
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
+        // Video support is needed for GPU scaling / hardware encoding; fall back without it.
+        let (device, context) = create_device(&adapter, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT)
+            .or_else(|_| create_device(&adapter, D3D11_CREATE_DEVICE_BGRA_SUPPORT))?;
+        // Media Foundation uses the device from its own threads.
+        if let Ok(multithread) = device.cast::<ID3D11Multithread>() {
+            unsafe {
+                let _ = multithread.SetMultithreadProtected(true);
+            }
         }
-        let device = device.ok_or("D3D11 device was not created")?;
-        let context = context.ok_or("D3D11 context was not created")?;
         let duplication = unsafe { output.DuplicateOutput(&device)? };
         Ok(Self {
             monitor,
@@ -154,8 +167,10 @@ impl Capturer {
             device,
             context,
             duplication,
+            cpu_readback,
             staging: None,
             bgra: Vec::new(),
+            gpu_copy: None,
             width: 0,
             height: 0,
             cursor: None,
@@ -166,9 +181,28 @@ impl Capturer {
         &self.monitor
     }
 
-    /// The most recent image, even if nothing changed since.
+    pub fn device(&self) -> &ID3D11Device {
+        &self.device
+    }
+
+    /// Size of the latest image (0×0 before the first one).
+    pub fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Cursor hot spot relative to the monitor, if visible.
+    pub fn cursor(&self) -> Option<(i32, i32)> {
+        self.cursor
+    }
+
+    /// The latest image on the GPU (BGRA), even if nothing changed since.
+    pub fn texture(&self) -> Option<&ID3D11Texture2D> {
+        self.gpu_copy.as_ref()
+    }
+
+    /// The latest image in system memory; only with `cpu_readback`.
     pub fn last_frame(&self) -> Option<CapturedFrame<'_>> {
-        (self.width > 0).then(|| CapturedFrame {
+        (self.cpu_readback && self.width > 0).then(|| CapturedFrame {
             width: self.width,
             height: self.height,
             bgra: &self.bgra,
@@ -177,18 +211,18 @@ impl Capturer {
     }
 
     /// Waits up to `timeout_ms` for the desktop image or cursor to change.
-    /// Returns `Ok(false)` when nothing changed.
-    pub fn poll(&mut self, timeout_ms: u32) -> Result<bool, BoxError> {
+    pub fn poll(&mut self, timeout_ms: u32) -> Result<Changes, BoxError> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
         match unsafe { self.duplication.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
             Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(Changes::default()),
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 // Mode change, secure desktop (UAC / lock screen) etc.: start over.
                 self.duplication = unsafe { self.output.DuplicateOutput(&self.device)? };
                 self.staging = None;
-                return Ok(false);
+                self.gpu_copy = None;
+                return Ok(Changes::default());
             }
             Err(e) => return Err(e.into()),
         }
@@ -197,22 +231,40 @@ impl Capturer {
         result
     }
 
-    fn read_frame(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO, resource: Option<IDXGIResource>) -> Result<bool, BoxError> {
-        let mut changed = false;
+    fn read_frame(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO, resource: Option<IDXGIResource>) -> Result<Changes, BoxError> {
+        let mut changes = Changes::default();
         if info.LastMouseUpdateTime != 0 {
             let p = info.PointerPosition;
-            self.cursor = p.Visible.as_bool().then_some((p.Position.x, p.Position.y));
-            changed = true;
+            let cursor = p.Visible.as_bool().then_some((p.Position.x, p.Position.y));
+            changes.cursor = cursor != self.cursor;
+            self.cursor = cursor;
         }
         if info.LastPresentTime == 0 {
-            return Ok(changed);
+            return Ok(changes);
         }
+        changes.image = true;
         let texture: ID3D11Texture2D = resource.ok_or("no desktop image")?.cast()?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
-        let staging = match &self.staging {
-            Some(s) if (self.width, self.height) == (desc.Width as usize, desc.Height as usize) => s.clone(),
-            _ => {
+        let (width, height) = (desc.Width as usize, desc.Height as usize);
+        let resized = (self.width, self.height) != (width, height);
+
+        if self.gpu_copy.is_none() || resized {
+            let copy_desc = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                ..desc
+            };
+            let mut copy = None;
+            unsafe { self.device.CreateTexture2D(&copy_desc, None, Some(&mut copy))? };
+            self.gpu_copy = Some(copy.ok_or("GPU copy texture was not created")?);
+        }
+        unsafe { self.context.CopyResource(self.gpu_copy.as_ref().unwrap(), &texture) };
+
+        if self.cpu_readback {
+            if self.staging.is_none() || resized {
                 let staging_desc = D3D11_TEXTURE2D_DESC {
                     Usage: D3D11_USAGE_STAGING,
                     BindFlags: 0,
@@ -222,28 +274,45 @@ impl Capturer {
                 };
                 let mut staging = None;
                 unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging))? };
-                let staging = staging.ok_or("staging texture was not created")?;
-                self.staging = Some(staging.clone());
-                staging
+                self.staging = Some(staging.ok_or("staging texture was not created")?);
             }
-        };
-        let (width, height) = (desc.Width as usize, desc.Height as usize);
-        unsafe {
-            self.context.CopyResource(&staging, &texture);
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-            let pitch = mapped.RowPitch as usize;
-            let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * height);
-            self.bgra.resize(width * height * 4, 0);
-            for (y, row) in self.bgra.chunks_exact_mut(width * 4).enumerate() {
-                row.copy_from_slice(&src[y * pitch..y * pitch + width * 4]);
+            let staging = self.staging.as_ref().unwrap();
+            unsafe {
+                self.context.CopyResource(staging, &texture);
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                self.context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+                let pitch = mapped.RowPitch as usize;
+                let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * height);
+                self.bgra.resize(width * height * 4, 0);
+                for (y, row) in self.bgra.chunks_exact_mut(width * 4).enumerate() {
+                    row.copy_from_slice(&src[y * pitch..y * pitch + width * 4]);
+                }
+                self.context.Unmap(staging, 0);
             }
-            self.context.Unmap(&staging, 0);
         }
         self.width = width;
         self.height = height;
-        Ok(true)
+        Ok(changes)
     }
+}
+
+fn create_device(adapter: &IDXGIAdapter1, flags: D3D11_CREATE_DEVICE_FLAG) -> Result<(ID3D11Device, ID3D11DeviceContext), BoxError> {
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            flags,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )?;
+    }
+    Ok((device.ok_or("D3D11 device was not created")?, context.ok_or("D3D11 context was not created")?))
 }
 
 #[cfg(test)]
@@ -255,12 +324,12 @@ mod tests {
     fn captures_first_monitor() {
         let Ok(monitors) = list_monitors() else { return };
         let Some(first) = monitors.first() else { return };
-        let Ok(mut capturer) = Capturer::new(first.index) else { return };
+        let Ok(mut capturer) = Capturer::new(first.index, true) else { return };
         // The first acquire returns the current desktop image.
         let mut got = false;
         for _ in 0..10 {
             match capturer.poll(200) {
-                Ok(true) if capturer.last_frame().is_some() => {
+                Ok(c) if c.image && capturer.last_frame().is_some() => {
                     got = true;
                     break;
                 }

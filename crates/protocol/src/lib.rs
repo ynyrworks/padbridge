@@ -24,6 +24,7 @@ mod kind {
     pub const VIDEO_FRAME: u8 = 0x11;
     pub const REQUEST_KEYFRAME: u8 = 0x12;
     pub const POINTER: u8 = 0x20;
+    pub const CURSOR: u8 = 0x21;
     pub const PING: u8 = 0x30;
     pub const PONG: u8 = 0x31;
     pub const LOG: u8 = 0x40;
@@ -108,6 +109,8 @@ pub enum Message {
         altitude: f32,
         azimuth: f32,
     },
+    /// Host cursor in normalized video coordinates; the receiver draws it.
+    Cursor { x: f32, y: f32, visible: bool },
     Ping { nonce: u64, t_us: u64 },
     Pong { nonce: u64, t_us: u64 },
     Log { level: u8, text: String },
@@ -188,6 +191,11 @@ impl Message {
                     w.f32(*v);
                 }
             }
+            Message::Cursor { x, y, visible } => {
+                w.f32(*x);
+                w.f32(*y);
+                w.u8(*visible as u8);
+            }
             Message::Ping { nonce, t_us } | Message::Pong { nonce, t_us } => {
                 w.u64(*nonce);
                 w.u64(*t_us);
@@ -223,6 +231,7 @@ impl Message {
             Message::VideoFrame { .. } => kind::VIDEO_FRAME,
             Message::RequestKeyframe => kind::REQUEST_KEYFRAME,
             Message::Pointer { .. } => kind::POINTER,
+            Message::Cursor { .. } => kind::CURSOR,
             Message::Ping { .. } => kind::PING,
             Message::Pong { .. } => kind::PONG,
             Message::Log { .. } => kind::LOG,
@@ -271,6 +280,7 @@ impl Message {
                 altitude: r.f32()?,
                 azimuth: r.f32()?,
             },
+            kind::CURSOR => Message::Cursor { x: r.f32()?, y: r.f32()?, visible: r.u8()? != 0 },
             kind::PING => Message::Ping { nonce: r.u64()?, t_us: r.u64()? },
             kind::PONG => Message::Pong { nonce: r.u64()?, t_us: r.u64()? },
             kind::LOG => Message::Log { level: r.u8()?, text: r.str()? },

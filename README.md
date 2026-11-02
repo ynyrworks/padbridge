@@ -89,7 +89,12 @@ cargo run --release -p padbridge-host --example fake_display
 cargo run --release -p padbridge-cli -- display 127.0.0.1
 ```
 
-目前用 CPU 縮放加 OpenH264 軟體編碼。在 RTX 5080 這台電腦上，1440p 螢幕約 38 fps，4K 螢幕約 18 fps（縮成 1920×1080 後傳送）。之後會改用 GPU 縮放和硬體編碼（Media Foundation / NVENC）。
+編碼方式：
+
+- **硬體編碼**（預設）：在 GPU 上縮放並轉成 NV12（D3D11 Video Processor），再交給 Media Foundation 的硬體 H.264 編碼器（NVIDIA、AMD、Intel 皆可）。在 RTX 5080 上，4K 或 1440p 縮成 1080p 每幀約 2 ms，可穩定 60 fps。
+- **軟體編碼**：沒有硬體編碼器時自動改用 CPU 縮放加 OpenH264。4K 約 18 fps，1440p 約 38 fps。
+
+滑鼠游標由 iPad 自己畫，所以只移動游標不需要重新編碼畫面。
 
 ### Mirror 模式（iPad → Windows）
 

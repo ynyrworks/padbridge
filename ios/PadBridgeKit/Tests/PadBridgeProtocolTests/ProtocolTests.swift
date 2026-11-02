@@ -12,6 +12,7 @@ final class ProtocolTests: XCTestCase {
         .videoFrame(ptsUs: 1_250_000, keyframe: false, rotation: 1, data: []),
         .requestKeyframe,
         .pointer(id: 7, kind: .pen, phase: .move, x: 0.25, y: 0.75, pressure: 0.5, altitude: 1.2, azimuth: -0.3),
+        .cursor(x: 0.25, y: 0.5, visible: true),
         .ping(nonce: 42, tUs: 99),
         .pong(nonce: 42, tUs: 99),
         .log(level: 2, text: "hello"),

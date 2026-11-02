@@ -25,6 +25,7 @@ fn samples() -> Vec<Message> {
             altitude: 1.2,
             azimuth: -0.3,
         },
+        Message::Cursor { x: 0.25, y: 0.5, visible: true },
         Message::Ping { nonce: 42, t_us: 99 },
         Message::Pong { nonce: 42, t_us: 99 },
         Message::Log { level: 2, text: "hello".into() },

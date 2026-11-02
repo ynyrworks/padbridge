@@ -55,6 +55,12 @@ fn main() {
                 match decoder.handle(&msg) {
                     Ok(Some(frame)) => {
                         count += 1;
+                        if last.is_none() {
+                            println!("first frame decoded: {}x{}", frame.width, frame.height);
+                            if let Some(path) = &png_path {
+                                save_png(path, &frame);
+                            }
+                        }
                         last = Some(frame);
                         if input_test && !input_sent {
                             input_sent = true;
