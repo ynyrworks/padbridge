@@ -177,7 +177,7 @@ fn resize_bilinear(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, 
     for (out, &(y0, wy)) in dst.chunks_exact_mut(dw * 4).zip(bilinear_taps(sh, dh).iter()) {
         let row0 = &src[y0 * sw * 4..][..sw * 4];
         let row1 = &src[(y0 + 1).min(sh - 1) * sw * 4..][..sw * 4];
-        for (px, &(x0, x1, wx)) in out.chunks_exact_mut(4).zip(&xs) {
+        for (px, &(x0, x1, wx)) in out.as_chunks_mut::<4>().0.iter_mut().zip(&xs) {
             let top = lerp_pixel(pixel(row0, x0), pixel(row0, x1), wx);
             let bottom = lerp_pixel(pixel(row1, x0), pixel(row1, x1), wx);
             px.copy_from_slice(&lerp_pixel(top, bottom, wy).to_le_bytes());
@@ -193,7 +193,7 @@ fn resize_area(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: 
             let mut sum = [0u32; 4];
             for y in y0..y1 {
                 let row = &src[(y * sw + x0) * 4..(y * sw + x1) * 4];
-                for px in row.chunks_exact(4) {
+                for px in row.as_chunks::<4>().0 {
                     for c in 0..4 {
                         sum[c] += u32::from(px[c]);
                     }
@@ -489,7 +489,7 @@ mod tests {
         let src = gray(&[90; 2560 * 4 / 4]);
         let mut dst = Vec::new();
         resize_bgra(&src, 64, 40, &mut dst, 48, 30);
-        assert!(dst.chunks_exact(4).all(|p| p == [90, 90, 90, 255]));
+        assert!(dst.as_chunks::<4>().0.iter().all(|p| *p == [90, 90, 90, 255]));
     }
 
     #[test]
