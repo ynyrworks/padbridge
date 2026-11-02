@@ -2468,6 +2468,8 @@ dependencies = [
  "openh264",
  "padbridge-protocol",
  "padbridge-usbmux",
+ "png",
+ "windows",
 ]
 
 [[package]]

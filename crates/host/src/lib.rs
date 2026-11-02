@@ -1,6 +1,9 @@
 //! Windows-side PadBridge logic shared by the CLI and the desktop app.
 
+#[cfg(windows)]
+pub mod capture;
 pub mod discovery;
+pub mod display;
 pub mod mirror;
 pub mod session;
 pub mod target;

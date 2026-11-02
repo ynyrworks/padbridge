@@ -68,7 +68,7 @@ pub fn resolve_target(spec: &str, default_port: u16) -> Result<(Transport, u16, 
             .iter()
             .filter(|d| d.connection == ConnectionType::Usb)
             .find(|d| udid.is_none_or(|u| d.serial.eq_ignore_ascii_case(u)))
-            .ok_or("找不到 USB 連接的 iPad（執行 `padbridge devices` 檢查）")?;
+            .ok_or("找不到 USB 連接的 iPad（執行 `padbridge-cli devices` 檢查）")?;
         let description = format!("USB {} 埠 {port}", describe_device(device));
         Ok((Transport::Usb { device_id: device.device_id }, port, description))
     } else {

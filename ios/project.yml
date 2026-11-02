@@ -27,6 +27,8 @@ targets:
         product: PadBridgeProtocol
       - package: PadBridgeKit
         product: PadBridgeNet
+      - package: PadBridgeKit
+        product: PadBridgeMedia
       - target: PadBridgeBroadcast
     info:
       path: Generated/App-Info.plist

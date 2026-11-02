@@ -22,7 +22,7 @@ jobs:
           name: PadBridge-windows
           path: |
             target/release/PadBridge.exe
-            target/release/padbridge.exe
+            target/release/padbridge-cli.exe
 
   ios:
     runs-on: macos-15

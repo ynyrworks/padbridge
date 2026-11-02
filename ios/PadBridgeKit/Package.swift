@@ -15,6 +15,6 @@ let package = Package(
         .target(name: "PadBridgeMedia", dependencies: ["PadBridgeNet", "PadBridgeProtocol"]),
         .testTarget(name: "PadBridgeProtocolTests", dependencies: ["PadBridgeProtocol"]),
         .testTarget(name: "PadBridgeNetTests", dependencies: ["PadBridgeNet"]),
-        .testTarget(name: "PadBridgeMediaTests", dependencies: ["PadBridgeMedia"]),
+        .testTarget(name: "PadBridgeMediaTests", dependencies: ["PadBridgeMedia"], resources: [.copy("Fixtures")]),
     ]
 )

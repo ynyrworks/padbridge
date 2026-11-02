@@ -1,5 +1,6 @@
 import CoreMedia
 import CoreVideo
+import VideoToolbox
 import XCTest
 import PadBridgeNet
 import PadBridgeProtocol
@@ -86,6 +87,96 @@ final class MediaTests: XCTestCase {
         }
         encoder.flush()
         XCTAssertEqual(lock.withLock { keyframes }, 2)
+    }
+
+    /// Encoder output, sent through the protocol and rebuilt by `VideoReceiver`,
+    /// must decode with VideoToolbox (the same decoder the display layer uses).
+    func testReceiverBuildsDecodableSampleBuffers() throws {
+        let encoder = VideoEncoder()
+        var frames: [EncodedFrame] = []
+        let lock = NSLock()
+        encoder.onFrame = { frame in lock.withLock { frames.append(frame) } }
+        for i in 0..<3 {
+            try encoder.encode(makePixelBuffer(width: 640, height: 480, seed: i), pts: CMTime(value: CMTimeValue(i), timescale: 60))
+        }
+        encoder.flush()
+        let encoded = lock.withLock { frames }
+        let first = try XCTUnwrap(encoded.first)
+
+        let format = try VideoReceiver.makeFormat(codec: .h264, parameterSets: try XCTUnwrap(first.parameterSets))
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format)
+        XCTAssertEqual(dimensions.width, 640)
+        XCTAssertEqual(dimensions.height, 480)
+
+        var session: VTDecompressionSession?
+        XCTAssertEqual(VTDecompressionSessionCreate(allocator: nil, formatDescription: format, decoderSpecification: nil,
+                                                    imageBufferAttributes: nil, outputCallback: nil,
+                                                    decompressionSessionOut: &session), noErr)
+        var decoded = 0
+        for frame in encoded {
+            let sample = try VideoReceiver.makeSampleBuffer(data: frame.data, format: format)
+            let status = VTDecompressionSessionDecodeFrame(try XCTUnwrap(session), sampleBuffer: sample, flags: [],
+                                                           infoFlagsOut: nil) { status, _, image, _, _ in
+                if status == noErr, let image, CVPixelBufferGetWidth(image) == 640 {
+                    lock.withLock { decoded += 1 }
+                }
+            }
+            XCTAssertEqual(status, noErr)
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(try XCTUnwrap(session))
+        XCTAssertEqual(lock.withLock { decoded }, encoded.count)
+
+        XCTAssertThrowsError(try VideoReceiver.makeFormat(codec: .h264, parameterSets: []))
+    }
+
+    /// Frames recorded from the Windows encoder (OpenH264, see
+    /// crates/host/examples/display_fixture.rs) must decode on Apple hardware.
+    func testDecodesWindowsEncodedStream() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "windows_h264", withExtension: "bin", subdirectory: "Fixtures"))
+        var decoder = FrameDecoder()
+        decoder.push([UInt8](try Data(contentsOf: url)))
+        var format: CMVideoFormatDescription?
+        var samples: [CMSampleBuffer] = []
+        while let message = try decoder.nextMessage() {
+            switch message {
+            case let .codecParams(codec, data):
+                format = try VideoReceiver.makeFormat(codec: codec, parameterSets: data)
+            case let .videoFrame(_, _, _, data):
+                samples.append(try VideoReceiver.makeSampleBuffer(data: data, format: try XCTUnwrap(format)))
+            default:
+                break
+            }
+        }
+        XCTAssertEqual(samples.count, 3)
+
+        var session: VTDecompressionSession?
+        XCTAssertEqual(VTDecompressionSessionCreate(allocator: nil, formatDescription: try XCTUnwrap(format),
+                                                    decoderSpecification: nil, imageBufferAttributes: nil,
+                                                    outputCallback: nil, decompressionSessionOut: &session), noErr)
+        var decoded = 0
+        let lock = NSLock()
+        for sample in samples {
+            VTDecompressionSessionDecodeFrame(try XCTUnwrap(session), sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
+                status, _, image, _, _ in
+                if status == noErr, let image, CVPixelBufferGetWidth(image) == 320, CVPixelBufferGetHeight(image) == 240 {
+                    lock.withLock { decoded += 1 }
+                }
+            }
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(try XCTUnwrap(session))
+        XCTAssertEqual(lock.withLock { decoded }, 3)
+    }
+
+    func testReceiverWaitsForKeyframe() {
+        let receiver = VideoReceiver()
+        var requests = 0
+        receiver.onNeedKeyframe = { requests += 1 }
+        // A delta frame before any keyframe is dropped silently.
+        receiver.handle(.videoFrame(ptsUs: 0, keyframe: false, rotation: 0, data: [0, 0, 0, 1, 0x41]))
+        XCTAssertEqual(requests, 0)
+        // A keyframe without parameter sets cannot be shown: ask for a new one.
+        receiver.handle(.videoFrame(ptsUs: 0, keyframe: true, rotation: 0, data: [0, 0, 0, 1, 0x65]))
+        XCTAssertEqual(requests, 1)
     }
 
     /// A host connecting to a static screen still gets a keyframe: the

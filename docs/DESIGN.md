@@ -107,10 +107,27 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
   - 旋轉方向取自 `RPVideoSampleOrientationKey`，放在 `VideoFrame` 的 flags 裡。
 - 背壓：`Server.broadcastVideo` 對「積壓 ≥ 6 則訊息」或「正在等關鍵幀」的連線直接丟棄差異幀，並要求編碼器產生關鍵幀。
 - 靜止畫面：新連線加入，或收到 `RequestKeyframe` 時，如果 ReplayKit 沒有送新幀，就用最後一幀重新編碼成關鍵幀。
-- Windows：`padbridge mirror` 用 OpenH264 解碼（目前只保證支援 Constrained Baseline），再用 minifb 顯示；解碼失敗時會送 `RequestKeyframe`。
+- Windows：`padbridge-cli mirror` 用 OpenH264 解碼（目前只保證支援 Constrained Baseline），再用 minifb 顯示；解碼失敗時會送 `RequestKeyframe`。
 - 待辦：
   - 改用 Media Foundation 硬體解碼加 D3D11 顯示，支援 High profile 與 HEVC。
   - 改用 Cisco 發佈的 OpenH264 二進位檔，以涵蓋 H.264 專利授權。
+
+### 4.2 Display 模式實作（M4）
+
+- Windows（`crates/host`）：
+  - `capture`：用 DXGI Desktop Duplication 擷取指定螢幕，程序設為 per-monitor DPI aware，所以拿到的是實體解析度與游標座標。
+  - `display::VideoPipeline`：縮放後畫上游標（Desktop Duplication 不含游標），再用 OpenH264（`ScreenContentRealTime`）編碼。縮放比例在 2 倍內用 SWAR bilinear，超過用面積平均。
+  - `run_display`：只有畫面或游標有變化時才編碼，並受 `max_fps` 限制；收到 `RequestKeyframe` 時，用最後一幀重新編碼成關鍵幀。
+- iPad：`VideoReceiver` 把 `CodecParams` 和 `VideoFrame` 組成 `CMSampleBuffer`，送進 `AVSampleBufferDisplayLayer`（硬體解碼，並設定 `DisplayImmediately`）；串流期間全螢幕顯示。
+- 跨平台驗證：`crates/host/examples/display_fixture.rs` 產生的 Windows 編碼串流放在 `PadBridgeMediaTests/Fixtures/windows_h264.bin`，CI 在 macOS 上用 VideoToolbox 解碼它。
+- 效能（RTX 5080，release 版）：
+  - 1440p → 1080p：約 38 fps，每幀編碼約 24 ms。
+  - 4K → 1080p：約 18 fps，每幀約 57 ms。
+  - 瓶頸是 CPU 縮放、讀回 4K 畫面、OpenH264 軟體編碼。
+- 待辦：
+  - 用 GPU 縮放（D3D11 Video Processor）後再讀回。
+  - 改用 Media Foundation 或 NVENC 硬體編碼。
+  - 讓 iPad 支援 High profile 與 HEVC。
 
 ## 5. 平台限制與因應
 
@@ -165,7 +182,7 @@ padbridge/
 | | 內容 | 驗證方式 |
 |---|---|---|
 | **M0** | 協定 crate + 測試 + 設計文件 | `cargo test` |
-| **M1** | Rust usbmux 客戶端：列出 iPad、建立 Connect 通道 | 接上 iPad 後執行 `padbridge devices` |
+| **M1** | Rust usbmux 客戶端：列出 iPad、建立 Connect 通道 | 接上 iPad 後執行 `padbridge-cli devices` |
 | **M2** | iOS 骨架 + CI 產 IPA：監聽、Hello/Ping；Host 經 USB 與 Wi‑Fi 皆可連線並量 RTT | Sideloadly 安裝後量測 |
 | **M3** | Mirror：廣播擴充編碼 → Windows 檢視器 | 在 Windows 視窗看到 iPad 畫面 |
 | **M4** | Display：VDD + 擷取 + 編碼 → iPad 顯示 | iPad 出現在 Windows 顯示設定中 |

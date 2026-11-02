@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
+use padbridge_host::capture::{list_monitors, Monitor};
 use padbridge_host::discovery::{Discovery, DiscoveryEvent, Endpoint};
+use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings};
 use padbridge_host::mirror::{run_mirror, Frame, MirrorEvent};
 use padbridge_host::target::{connect, resolve_target, Transport};
 use padbridge_host::{host_name, ping_session, Event};
@@ -23,9 +26,35 @@ pub struct PadBridgeApp {
     source_status: BTreeMap<&'static str, String>,
     manual_address: String,
     mirror: Option<MirrorView>,
+    display: Option<DisplayView>,
+    monitors: Vec<Monitor>,
+    monitor_index: usize,
     log: VecDeque<String>,
     log_tx: Sender<String>,
     log_rx: Receiver<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    Mirror,
+    Display,
+    Ping,
+}
+
+/// State shared between a display worker thread and the UI.
+#[derive(Default)]
+struct DisplayShared {
+    peer_name: Option<String>,
+    screen: Option<String>,
+    streaming: Option<String>,
+    stats: Option<String>,
+    ended: Option<String>,
+}
+
+struct DisplayView {
+    title: String,
+    shared: Arc<Mutex<DisplayShared>>,
+    stop: Arc<AtomicBool>,
 }
 
 /// State shared between a mirror worker thread and the UI.
@@ -72,16 +101,28 @@ impl PadBridgeApp {
             source_status: BTreeMap::new(),
             manual_address: String::new(),
             mirror: None,
+            display: None,
+            monitors: Vec::new(),
+            monitor_index: 0,
             log: VecDeque::new(),
             log_tx,
             log_rx,
         };
-        // `PadBridge.exe --mirror <target>` starts mirroring right away (handy for shortcuts).
+        app.refresh_monitors();
+        // `PadBridge.exe --mirror <target>` / `--display <target>` start right away (handy for shortcuts).
         let args: Vec<String> = std::env::args().skip(1).collect();
         if let [flag, target] = args.as_slice() {
-            if flag == "--mirror" {
-                match resolve_target(target, MIRROR_PORT) {
-                    Ok((transport, port, description)) => app.start_mirror(description, transport, port),
+            let (kind, default_port) = match flag.as_str() {
+                "--mirror" => (Some(Action::Mirror), MIRROR_PORT),
+                "--display" => (Some(Action::Display), DISPLAY_PORT),
+                _ => (None, 0),
+            };
+            if let Some(kind) = kind {
+                match resolve_target(target, default_port) {
+                    Ok((transport, port, description)) => match kind {
+                        Action::Display => app.start_display(description, transport, port),
+                        _ => app.start_mirror(description, transport, port),
+                    },
                     Err(e) => app.push_log(format!("{target}：{e}")),
                 }
             }
@@ -128,9 +169,7 @@ impl PadBridgeApp {
     }
 
     fn start_mirror(&mut self, title: String, transport: Transport, port: u16) {
-        if let Some(old) = self.mirror.take() {
-            old.stop();
-        }
+        self.stop_sessions();
         self.push_log(format!("開始鏡像：{title}"));
         let shared = Arc::new(Mutex::new(MirrorShared::default()));
         let worker_shared = shared.clone();
@@ -233,7 +272,7 @@ impl PadBridgeApp {
             ui.label(RichText::new("尚未發現裝置。\n用 USB 接上 iPad（並點「信任」），\n或在同一個網路的 iPad 上開啟 PadBridge App。").weak());
         }
 
-        let mut action: Option<(bool, String, Transport, u16)> = None; // (is_mirror, title, transport, port)
+        let mut action: Option<(Action, String, Transport, u16)> = None;
         for endpoint in &self.endpoints {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -252,19 +291,22 @@ impl PadBridgeApp {
                     let can_mirror = matches!(endpoint.role, None | Some(Role::MirrorSource));
                     let can_ping = matches!(endpoint.role, None | Some(Role::DisplaySink));
                     let port_for = |default: u16| endpoint.port.unwrap_or(default);
+                    if can_ping && ui.button("🖥 延伸螢幕").on_hover_text("把下方選擇的螢幕顯示在 iPad 上").clicked() {
+                        action = Some((Action::Display, endpoint.name.clone(), endpoint.transport.clone(), port_for(DISPLAY_PORT)));
+                    }
                     if can_mirror && ui.button("📺 鏡像").on_hover_text("在這裡顯示 iPad 畫面（iPad 需先開始廣播）").clicked() {
-                        action = Some((true, endpoint.name.clone(), endpoint.transport.clone(), port_for(MIRROR_PORT)));
+                        action = Some((Action::Mirror, endpoint.name.clone(), endpoint.transport.clone(), port_for(MIRROR_PORT)));
                     }
-                    if can_ping && ui.button("⏱ 測試連線").clicked() {
-                        action = Some((false, endpoint.name.clone(), endpoint.transport.clone(), port_for(DISPLAY_PORT)));
-                    }
-                    if can_ping {
-                        ui.add_enabled(false, egui::Button::new("🖥 延伸螢幕"))
-                            .on_disabled_hover_text("Display 模式開發中（M4）");
+                    if can_ping && ui.button("⏱").on_hover_text("測試連線").clicked() {
+                        action = Some((Action::Ping, endpoint.name.clone(), endpoint.transport.clone(), port_for(DISPLAY_PORT)));
                     }
                 });
             });
         }
+
+        ui.add_space(12.0);
+        ui.separator();
+        self.monitor_picker(ui);
 
         ui.add_space(12.0);
         ui.separator();
@@ -273,10 +315,15 @@ impl PadBridgeApp {
         ui.horizontal(|ui| {
             let address = self.manual_address.trim().to_string();
             ui.add_enabled_ui(!address.is_empty(), |ui| {
-                for (is_mirror, label, default_port) in [(true, "📺 鏡像", MIRROR_PORT), (false, "⏱ 測試連線", DISPLAY_PORT)] {
+                let buttons = [
+                    (Action::Display, "🖥 延伸螢幕", DISPLAY_PORT),
+                    (Action::Mirror, "📺 鏡像", MIRROR_PORT),
+                    (Action::Ping, "⏱", DISPLAY_PORT),
+                ];
+                for (kind, label, default_port) in buttons {
                     if ui.button(label).clicked() {
                         match resolve_target(&address, default_port) {
-                            Ok((transport, port, description)) => action = Some((is_mirror, description, transport, port)),
+                            Ok((transport, port, description)) => action = Some((kind, description, transport, port)),
                             Err(e) => {
                                 let _ = self.log_tx.send(format!("{address}：{e}"));
                             }
@@ -286,12 +333,141 @@ impl PadBridgeApp {
             });
         });
 
-        if let Some((is_mirror, title, transport, port)) = action {
-            if is_mirror {
-                self.start_mirror(title, transport, port);
-            } else {
-                self.start_ping(title, transport, port);
+        if let Some((kind, title, transport, port)) = action {
+            match kind {
+                Action::Mirror => self.start_mirror(title, transport, port),
+                Action::Display => self.start_display(title, transport, port),
+                Action::Ping => self.start_ping(title, transport, port),
             }
+        }
+    }
+
+    fn monitor_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("傳送到 iPad 的螢幕").strong());
+        ui.horizontal(|ui| {
+            let selected = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.label());
+            egui::ComboBox::from_id_salt("monitor")
+                .width(ui.available_width() - 36.0)
+                .selected_text(selected.unwrap_or_else(|| "（沒有螢幕）".into()))
+                .show_ui(ui, |ui| {
+                    for m in &self.monitors {
+                        ui.selectable_value(&mut self.monitor_index, m.index, m.label());
+                    }
+                });
+            if ui.button("🔄").on_hover_text("重新整理螢幕清單（新增虛擬螢幕後）").clicked() {
+                self.refresh_monitors();
+            }
+        });
+        let virtual_display = self.monitors.iter().any(|m| !m.primary && m.adapter.to_lowercase().contains("virtual"));
+        if !virtual_display {
+            ui.label(
+                RichText::new("目前只會鏡像既有螢幕。要讓 iPad 成為「延伸」螢幕，請安裝虛擬顯示器驅動（例如 Virtual Display Driver），再按 🔄 並選它新增的螢幕。")
+                    .small()
+                    .weak(),
+            );
+        }
+    }
+
+    fn refresh_monitors(&mut self) {
+        match list_monitors() {
+            Ok(monitors) => {
+                // Prefer a virtual display if one exists, since that's the extended-desktop case.
+                if !monitors.iter().any(|m| m.index == self.monitor_index) || self.monitors.is_empty() {
+                    self.monitor_index = monitors
+                        .iter()
+                        .find(|m| m.adapter.to_lowercase().contains("virtual"))
+                        .or_else(|| monitors.first())
+                        .map_or(0, |m| m.index);
+                }
+                self.monitors = monitors;
+            }
+            Err(e) => self.push_log(format!("無法列出螢幕：{e}")),
+        }
+    }
+
+    fn stop_sessions(&mut self) {
+        if let Some(view) = self.mirror.take() {
+            view.stop();
+        }
+        if let Some(view) = self.display.take() {
+            view.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn start_display(&mut self, title: String, transport: Transport, port: u16) {
+        self.stop_sessions();
+        let settings = DisplaySettings { monitor: self.monitor_index, ..DisplaySettings::default() };
+        let monitor = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.label()).unwrap_or_default();
+        self.push_log(format!("延伸螢幕：{monitor} → {title}"));
+        let shared = Arc::new(Mutex::new(DisplayShared::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (worker_shared, worker_stop, ctx, log) = (shared.clone(), stop.clone(), self.ctx.clone(), self.log_tx.clone());
+        thread::spawn(move || {
+            let stream = match connect(&transport, port) {
+                Ok(s) => s,
+                Err(e) => {
+                    worker_shared.lock().unwrap().ended = Some(format!("連線失敗：{e}"));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            run_display(stream, &host_name(), settings, &worker_stop, |event| {
+                let mut s = worker_shared.lock().unwrap();
+                match event {
+                    DisplayEvent::Connected { name } => s.peer_name = Some(name),
+                    DisplayEvent::Screen { width_px, height_px, max_fps } => {
+                        s.screen = Some(format!("iPad {width_px}×{height_px} · {max_fps} Hz"));
+                    }
+                    DisplayEvent::Streaming { monitor, width, height } => {
+                        s.streaming = Some(format!("{monitor}\n傳送解析度 {width}×{height}"));
+                    }
+                    DisplayEvent::Stats { fps, kbps, encode_ms } => {
+                        s.stats = Some(format!("{fps:.0} fps · {:.1} Mbps · 編碼 {encode_ms:.1} ms", kbps / 1000.0));
+                    }
+                    DisplayEvent::Log(text) => {
+                        let _ = log.send(format!("[iPad] {text}"));
+                    }
+                    DisplayEvent::Ended(reason) => s.ended = Some(reason),
+                }
+                ctx.request_repaint();
+            });
+        });
+        self.display = Some(DisplayView { title, shared, stop });
+    }
+
+    fn display_view(&mut self, ui: &mut egui::Ui) {
+        let Some(view) = &self.display else { return };
+        let s = view.shared.lock().unwrap();
+        let mut stop = false;
+        ui.horizontal(|ui| {
+            ui.heading(format!("🖥 {}", s.peer_name.as_deref().unwrap_or(&view.title)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                stop = ui.button(if s.ended.is_some() { "關閉" } else { "⏹ 停止" }).clicked();
+            });
+        });
+        ui.separator();
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            match &s.ended {
+                Some(reason) => {
+                    ui.label(RichText::new(reason).color(ui.visuals().warn_fg_color).size(16.0));
+                }
+                None if s.streaming.is_none() => {
+                    ui.spinner();
+                    ui.label("連線中…");
+                }
+                None => {
+                    ui.label(RichText::new("正在把螢幕顯示在 iPad 上").size(18.0));
+                }
+            }
+            ui.add_space(12.0);
+            for line in [&s.streaming, &s.screen, &s.stats].into_iter().flatten() {
+                ui.label(RichText::new(line).weak());
+            }
+        });
+        drop(s);
+        if stop {
+            self.stop_sessions();
         }
     }
 
@@ -381,13 +557,17 @@ impl eframe::App for PadBridgeApp {
             ui.label(RichText::new("事件").strong());
             self.log_panel(ui);
         });
-        egui::CentralPanel::default().show(ui, |ui| self.mirror_view(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.display.is_some() {
+                self.display_view(ui);
+            } else {
+                self.mirror_view(ui);
+            }
+        });
     }
 
     fn on_exit(&mut self) {
-        if let Some(view) = self.mirror.take() {
-            view.stop();
-        }
+        self.stop_sessions();
     }
 }
 
