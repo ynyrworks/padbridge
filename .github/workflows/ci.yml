@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift package tests (protocol + networking, on macOS)
+        working-directory: ios/PadBridgeKit
+        run: swift test
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Archive (unsigned)
+        working-directory: ios
+        run: |
+          xcodebuild archive \
+            -project PadBridge.xcodeproj \
+            -scheme PadBridge \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/PadBridge.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        working-directory: ios/build
+        run: |
+          mkdir Payload
+          cp -R PadBridge.xcarchive/Products/Applications/PadBridge.app Payload/
+          test -d Payload/PadBridge.app/PlugIns/PadBridgeBroadcast.appex
+          zip -qry PadBridge-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PadBridge-unsigned-ipa
+          path: ios/build/PadBridge-unsigned.ipa

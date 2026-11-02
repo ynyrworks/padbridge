@@ -1,0 +1,73 @@
+# XcodeGen spec — run `xcodegen generate` in this folder to create PadBridge.xcodeproj.
+name: PadBridge
+
+options:
+  bundleIdPrefix: io.github.padbridge
+  deploymentTarget:
+    iOS: "17.0"
+
+packages:
+  PadBridgeKit:
+    path: PadBridgeKit
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "2"
+
+targets:
+  PadBridge:
+    type: application
+    platform: iOS
+    sources: [App]
+    dependencies:
+      - package: PadBridgeKit
+        product: PadBridgeProtocol
+      - package: PadBridgeKit
+        product: PadBridgeNet
+      - target: PadBridgeBroadcast
+    info:
+      path: Generated/App-Info.plist
+      properties:
+        CFBundleDisplayName: PadBridge
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        NSLocalNetworkUsageDescription: PadBridge 需要區域網路權限，讓 Windows 電腦能找到並連線到這台 iPad。
+        NSBonjourServices:
+          - _padbridge._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.padbridge.app
+    scheme: {}
+
+  PadBridgeBroadcast:
+    type: app-extension
+    platform: iOS
+    sources: [BroadcastExtension]
+    dependencies:
+      - package: PadBridgeKit
+        product: PadBridgeProtocol
+      - package: PadBridgeKit
+        product: PadBridgeNet
+      - sdk: ReplayKit.framework
+    info:
+      path: Generated/Broadcast-Info.plist
+      properties:
+        CFBundleDisplayName: PadBridge Mirror
+        NSLocalNetworkUsageDescription: PadBridge 需要區域網路權限，把 iPad 畫面傳送到 Windows。
+        NSBonjourServices:
+          - _padbridge._tcp
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.padbridge.app.broadcast

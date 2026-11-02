@@ -1,0 +1,8 @@
+/target
+*.ipa
+ios/*.xcodeproj
+ios/build/
+ios/Generated/
+ios/PadBridgeKit/.build/
+ios/PadBridgeKit/.swiftpm/
+.DS_Store
