@@ -1,15 +1,14 @@
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::process::ExitCode;
-use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use minifb::{Key, ScaleMode, Window, WindowOptions};
-use padbridge_cli::mirror::{Frame, MirrorDecoder, MirrorError};
-use padbridge_cli::{ping_session, Event};
-use padbridge_protocol::{FrameDecoder, Message, Role, DISPLAY_PORT, MIRROR_PORT, PROTOCOL_VERSION};
-use padbridge_usbmux::{ConnectionType, Device, DeviceEvent, Usbmux};
+use padbridge_host::mirror::{run_mirror, Frame, MirrorEvent};
+use padbridge_host::target::{connect, describe_device, resolve_target};
+use padbridge_host::{host_name, ping_session, BoxError, Event};
+use padbridge_protocol::{DISPLAY_PORT, MIRROR_PORT};
+use padbridge_usbmux::{DeviceEvent, Usbmux};
 
 const USAGE: &str = "\
 用法：
@@ -21,10 +20,11 @@ const USAGE: &str = "\
 <目標>：
   usb[:埠]          第一台 USB 連接的 iPad（usbmux）
   usb:<UDID>[:埠]   指定 UDID 的 iPad
-  <IP>[:埠]         Wi‑Fi / 區網
+  <IP>[:埠]         Wi-Fi / 區網
 
 mirror 需要先在 iPad 的 PadBridge App 按下廣播按鈕。
-USB 需要 Apple Mobile Device Service（「Apple 裝置」App 或 iTunes）。";
+USB 需要 Apple Mobile Device Service（「Apple 裝置」App 或 iTunes）。
+圖形介面版本：PadBridge.exe（crates/app）。";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,24 +49,11 @@ fn main() -> ExitCode {
     }
 }
 
-type CliResult = Result<ExitCode, Box<dyn std::error::Error>>;
+type CliResult = Result<ExitCode, BoxError>;
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
     ExitCode::from(2)
-}
-
-fn host_name() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PadBridge host".into())
-}
-
-fn describe(d: &Device) -> String {
-    let via = match &d.connection {
-        ConnectionType::Usb => "USB".to_string(),
-        ConnectionType::Network => "Wi‑Fi 同步".to_string(),
-        ConnectionType::Other(s) => s.clone(),
-    };
-    format!("#{:<3} {:<8} {}", d.device_id, via, d.serial)
 }
 
 fn devices() -> CliResult {
@@ -75,7 +62,7 @@ fn devices() -> CliResult {
         println!("沒有裝置。請用 USB 接上 iPad，並在 iPad 上點「信任這部電腦」。");
     }
     for d in &devices {
-        println!("{}", describe(d));
+        println!("{}", describe_device(d));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -84,51 +71,22 @@ fn watch() -> CliResult {
     println!("監看中，按 Ctrl+C 結束");
     for event in Usbmux::new().listen()? {
         match event? {
-            DeviceEvent::Attached(d) => println!("+ {}", describe(&d)),
+            DeviceEvent::Attached(d) => println!("+ {}", describe_device(&d)),
             DeviceEvent::Detached { device_id } => println!("- #{device_id}"),
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Parses `usb`, `usb:<port>`, `usb:<udid>` or `usb:<udid>:<port>`.
-fn parse_usb_target(spec: &str, default_port: u16) -> Option<(Option<&str>, u16)> {
-    let rest = spec.strip_prefix("usb")?;
-    let parts: Vec<&str> = rest.split(':').skip(1).collect();
-    match parts.as_slice() {
-        [] => Some((None, default_port)),
-        [one] => Some(match one.parse() {
-            Ok(port) => (None, port),
-            Err(_) => (Some(*one), default_port),
-        }),
-        [udid, port] => Some((Some(*udid), port.parse().ok()?)),
-        _ => None,
-    }
-}
-
-/// Connects to `usb…` targets through usbmux, anything else over TCP.
-fn open_target(target: &str, default_port: u16) -> Result<TcpStream, Box<dyn std::error::Error>> {
-    if target == "usb" || target.starts_with("usb:") {
-        let (udid, port) = parse_usb_target(target, default_port).ok_or("無效的 USB 目標")?;
-        let mux = Usbmux::new();
-        let devices = mux.list_devices()?;
-        let device = devices
-            .iter()
-            .filter(|d| d.connection == ConnectionType::Usb)
-            .find(|d| udid.is_none_or(|u| d.serial.eq_ignore_ascii_case(u)))
-            .ok_or("找不到 USB 連接的 iPad（執行 `padbridge devices` 檢查）")?;
-        println!("經 USB 連線 {} 埠 {port}", describe(device));
-        Ok(mux.connect(device.device_id, port)?)
-    } else {
-        let addr = if target.contains(':') { target.to_string() } else { format!("{target}:{default_port}") };
-        let stream = TcpStream::connect(&addr).map_err(|e| format!("無法連線 {addr}：{e}"))?;
-        println!("已連線 {addr}");
-        Ok(stream)
-    }
+fn open(target: &str, default_port: u16) -> Result<std::net::TcpStream, BoxError> {
+    let (transport, port, description) = resolve_target(target, default_port)?;
+    let stream = connect(&transport, port)?;
+    println!("已連線 {description}");
+    Ok(stream)
 }
 
 fn ping(target: &str, count: u32) -> CliResult {
-    let stream = open_target(target, DISPLAY_PORT)?;
+    let stream = open(target, DISPLAY_PORT)?;
     let summary = ping_session(stream, &host_name(), count, Duration::from_millis(200), |event| match event {
         Event::Rtt(rtt) => println!("RTT {:.2} ms", rtt.as_secs_f64() * 1000.0),
         Event::Received(msg) => println!("← {msg:?}"),
@@ -152,15 +110,28 @@ fn ping(target: &str, count: u32) -> CliResult {
 }
 
 fn mirror(target: &str) -> CliResult {
-    let stream = open_target(target, MIRROR_PORT)?;
-    stream.set_nodelay(true)?;
-    let mut writer = stream.try_clone()?;
-    let hello = Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name() };
-    writer.write_all(&hello.to_frame()?)?;
+    let stream = open(target, MIRROR_PORT)?;
+    let shutdown = stream.try_clone()?;
 
-    // Small buffer: if the window falls behind, newer frames replace older ones.
+    // Small buffer: if the window falls behind, frames are dropped rather than queued.
     let (tx, rx) = mpsc::sync_channel::<Frame>(2);
-    let receiver = thread::spawn(move || receive_mirror(stream, writer, tx));
+    let name = host_name();
+    thread::spawn(move || {
+        run_mirror(
+            stream,
+            &name,
+            |frame| !matches!(tx.try_send(frame), Err(TrySendError::Disconnected(_))),
+            |event| match event {
+                MirrorEvent::Connected { name } => println!("已連上 {name}"),
+                MirrorEvent::Stream { codec, width, height, fps, bitrate_kbps } => {
+                    println!("串流 {codec:?} {width}×{height} @{fps} fps, {bitrate_kbps} kbps")
+                }
+                MirrorEvent::Log(text) => println!("[iPad] {text}"),
+                MirrorEvent::DecodeError(e) => eprintln!("{e}；要求關鍵幀"),
+                MirrorEvent::Ended(reason) => println!("{reason}"),
+            },
+        );
+    });
 
     let mut window: Option<Window> = None;
     let mut shown = 0u32;
@@ -192,11 +163,7 @@ fn mirror(target: &str) -> CliResult {
             break;
         }
     }
-    // Dropping the receiver ends the network thread on its next frame.
-    drop(rx);
-    if receiver.is_finished() {
-        let _ = receiver.join();
-    }
+    let _ = shutdown.shutdown(std::net::Shutdown::Both);
     println!("鏡像結束");
     Ok(ExitCode::SUCCESS)
 }
@@ -215,70 +182,4 @@ fn open_window(width: usize, height: usize) -> Window {
     // Frames are paced by the iPad; don't let minifb add its own delay.
     window.set_target_fps(0);
     window
-}
-
-/// Network thread: reads messages, decodes video and hands frames to the window.
-fn receive_mirror(mut stream: TcpStream, mut writer: TcpStream, tx: SyncSender<Frame>) {
-    let mut decoder = match MirrorDecoder::new() {
-        Ok(d) => d,
-        Err(e) => return eprintln!("無法初始化解碼器：{e}"),
-    };
-    let mut frames = FrameDecoder::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = match stream.read(&mut buf) {
-            Ok(0) => return println!("iPad 已中斷連線"),
-            Ok(n) => n,
-            Err(e) => return eprintln!("連線錯誤：{e}"),
-        };
-        frames.push(&buf[..n]);
-        loop {
-            let msg = match frames.next_message() {
-                Ok(Some(msg)) => msg,
-                Ok(None) => break,
-                Err(e) => return eprintln!("協定錯誤：{e}"),
-            };
-            match &msg {
-                Message::Hello { name, .. } => println!("已連上 {name}"),
-                Message::StreamConfig { codec, width, height, fps, bitrate_kbps } => {
-                    println!("串流 {codec:?} {width}×{height} @{fps} fps, {bitrate_kbps} kbps")
-                }
-                Message::Log { text, .. } => println!("[iPad] {text}"),
-                Message::Bye => return println!("iPad 結束廣播"),
-                _ => {}
-            }
-            match decoder.handle(&msg) {
-                Ok(Some(frame)) => {
-                    if let Err(TrySendError::Disconnected(_)) = tx.try_send(frame) {
-                        let _ = writer.write_all(&Message::Bye.to_frame().unwrap());
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(e @ MirrorError::UnsupportedCodec(_)) => return eprintln!("{e}"),
-                Err(e) => {
-                    eprintln!("{e}；要求關鍵幀");
-                    if writer.write_all(&Message::RequestKeyframe.to_frame().unwrap()).is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_usb_target;
-
-    #[test]
-    fn usb_targets() {
-        assert_eq!(parse_usb_target("usb", 47800), Some((None, 47800)));
-        assert_eq!(parse_usb_target("usb", 47801), Some((None, 47801)));
-        assert_eq!(parse_usb_target("usb:47801", 47800), Some((None, 47801)));
-        assert_eq!(parse_usb_target("usb:00008103-ABC", 47800), Some((Some("00008103-ABC"), 47800)));
-        assert_eq!(parse_usb_target("usb:00008103-ABC:47801", 47800), Some((Some("00008103-ABC"), 47801)));
-        assert_eq!(parse_usb_target("usb:a:b:c", 47800), None);
-        assert_eq!(parse_usb_target("usb:abc:notaport", 47800), None);
-    }
 }

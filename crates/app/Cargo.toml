@@ -1,0 +1,16 @@
+[package]
+name = "padbridge-app"
+description = "PadBridge desktop app for Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "PadBridge"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.35.0"
+padbridge-host = { path = "../host" }
+padbridge-protocol = { path = "../protocol" }

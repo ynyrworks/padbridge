@@ -149,8 +149,9 @@ padbridge/
 ├─ crates/
 │  ├─ protocol/               # 線路協定（無相依）
 │  ├─ usbmux/                 # usbmuxd 客戶端          (M1)
-│  ├─ cli/                    # 測試工具：devices / watch / ping
-│  └─ host/                   # Windows 主程式           (M3+)
+│  ├─ host/                   # 共用：連線、探索、鏡像解碼
+│  ├─ cli/                    # 命令列：devices / watch / ping / mirror
+│  └─ app/                    # Windows 桌面 App（egui）
 ├─ ios/                       # Swift / XcodeGen       (M2+)
 │  ├─ project.yml
 │  ├─ App/

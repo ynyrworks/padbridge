@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/usbmux", "crates/cli"]
+members = ["crates/protocol", "crates/usbmux", "crates/host", "crates/cli", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"

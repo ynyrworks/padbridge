@@ -1,10 +1,93 @@
-//! Mirror mode, host side: turns the iPad's video messages into RGB frames.
+//! Mirror mode, host side: receives the iPad's video stream and turns it into
+//! RGB frames.
 
 use std::fmt;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
-use padbridge_protocol::{Codec, Message};
+use padbridge_protocol::{Codec, FrameDecoder, Message, Role, PROTOCOL_VERSION};
+
+/// What a mirror session reports besides frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirrorEvent {
+    Connected { name: String },
+    Stream { codec: Codec, width: u32, height: u32, fps: u16, bitrate_kbps: u32 },
+    Log(String),
+    /// Recoverable: a keyframe has been requested.
+    DecodeError(String),
+    Ended(String),
+}
+
+/// Runs a mirror session on the calling thread until the iPad disconnects,
+/// `on_frame` returns `false`, or the stream is shut down from elsewhere
+/// (`TcpStream::shutdown` on a clone is the way to stop it).
+pub fn run_mirror(
+    mut stream: TcpStream,
+    host_name: &str,
+    mut on_frame: impl FnMut(Frame) -> bool,
+    mut on_event: impl FnMut(MirrorEvent),
+) {
+    let mut writer = match stream.try_clone() {
+        Ok(w) => w,
+        Err(e) => return on_event(MirrorEvent::Ended(format!("連線錯誤：{e}"))),
+    };
+    let mut send = |msg: Message| writer.write_all(&msg.to_frame().expect("small message"));
+    if let Err(e) = send(Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() }) {
+        return on_event(MirrorEvent::Ended(format!("連線錯誤：{e}")));
+    }
+    let mut decoder = match MirrorDecoder::new() {
+        Ok(d) => d,
+        Err(e) => return on_event(MirrorEvent::Ended(format!("無法初始化解碼器：{e}"))),
+    };
+    let mut frames = FrameDecoder::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => return on_event(MirrorEvent::Ended("iPad 已中斷連線".into())),
+            Ok(n) => n,
+            Err(e) => return on_event(MirrorEvent::Ended(format!("連線結束：{e}"))),
+        };
+        frames.push(&buf[..n]);
+        loop {
+            let msg = match frames.next_message() {
+                Ok(Some(msg)) => msg,
+                Ok(None) => break,
+                Err(e) => return on_event(MirrorEvent::Ended(format!("協定錯誤：{e}"))),
+            };
+            match &msg {
+                Message::Hello { name, .. } => on_event(MirrorEvent::Connected { name: name.clone() }),
+                Message::StreamConfig { codec, width, height, fps, bitrate_kbps } => on_event(MirrorEvent::Stream {
+                    codec: *codec,
+                    width: *width,
+                    height: *height,
+                    fps: *fps,
+                    bitrate_kbps: *bitrate_kbps,
+                }),
+                Message::Log { text, .. } => on_event(MirrorEvent::Log(text.clone())),
+                Message::Bye => return on_event(MirrorEvent::Ended("iPad 結束廣播".into())),
+                _ => {}
+            }
+            match decoder.handle(&msg) {
+                Ok(Some(frame)) => {
+                    if !on_frame(frame) {
+                        let _ = send(Message::Bye);
+                        return on_event(MirrorEvent::Ended("已停止".into()));
+                    }
+                }
+                Ok(None) => {}
+                Err(e @ MirrorError::UnsupportedCodec(_)) => return on_event(MirrorEvent::Ended(e.to_string())),
+                Err(e) => {
+                    on_event(MirrorEvent::DecodeError(e.to_string()));
+                    if send(Message::RequestKeyframe).is_err() {
+                        return on_event(MirrorEvent::Ended("連線中斷".into()));
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// A decoded frame, upright, as `0RGB` pixels (the layout minifb expects).
 #[derive(Debug, Clone)]

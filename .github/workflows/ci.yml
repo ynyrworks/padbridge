@@ -13,6 +13,16 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+      - name: Build Windows binaries
+        run: cargo build --release -p padbridge-app -p padbridge-cli
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: PadBridge-windows
+          path: |
+            target/release/PadBridge.exe
+            target/release/padbridge.exe
+
   ios:
     runs-on: macos-15
     steps:

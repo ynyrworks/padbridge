@@ -7,6 +7,24 @@
 
 > 🚧 開發中：已完成線路協定（M0）、USB usbmux 通道（M1）、iOS 骨架（M2）與 Mirror 模式（M3）。架構與里程碑見 [docs/DESIGN.md](docs/DESIGN.md)。
 
+## Windows App
+
+![PadBridge 桌面 App 鏡像畫面](docs/app-mirror.png)
+
+`PadBridge.exe`（`crates/app`）提供：
+
+- **裝置清單**：USB 接上的 iPad 會自動出現（透過 usbmux）；同一個網路上開著 PadBridge App 或正在廣播的 iPad，會透過 Bonjour 自動發現。
+- **鏡像**：在 App 內顯示 iPad 畫面，並顯示解析度與 fps。
+- **測試連線**：量測來回延遲。
+- **手動連線**：輸入 IP 或 `usb`。
+- `PadBridge.exe --mirror usb`：啟動後立刻開始鏡像，適合做成捷徑。
+
+```bash
+cargo run --release -p padbridge-app
+```
+
+GitHub Actions 每次建置都會產出 `PadBridge-windows` artifact，內含 `PadBridge.exe` 和 `padbridge.exe`（CLI）。第一次執行時，Windows 防火牆可能會詢問是否允許區域網路存取（Bonjour 需要）。
+
 ## 需求（規劃中）
 
 - Windows 10 1809+ / Windows 11
@@ -53,7 +71,7 @@ cargo run --release -p padbridge-cli -- mirror usb
 沒有 iPad 也能測試檢視器：先執行假的鏡像來源，再連到本機：
 
 ```bash
-cargo run -p padbridge-cli --example fake_mirror
+cargo run -p padbridge-host --example fake_mirror
 ```
 
 ```bash

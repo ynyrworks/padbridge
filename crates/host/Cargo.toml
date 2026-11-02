@@ -1,0 +1,13 @@
+[package]
+name = "padbridge-host"
+description = "Windows-side PadBridge logic shared by the CLI and the desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mdns-sd = "0.21.7"
+openh264 = "0.9.9"
+padbridge-protocol = { path = "../protocol" }
+padbridge-usbmux = { path = "../usbmux" }

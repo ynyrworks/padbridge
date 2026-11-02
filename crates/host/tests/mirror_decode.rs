@@ -3,7 +3,7 @@
 
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbSliceU8, YUVBuffer};
-use padbridge_cli::mirror::{annex_b_to_avcc, MirrorDecoder};
+use padbridge_host::mirror::{annex_b_to_avcc, MirrorDecoder};
 use padbridge_protocol::{Codec, Message};
 
 const W: usize = 64;

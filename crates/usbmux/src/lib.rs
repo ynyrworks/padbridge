@@ -90,7 +90,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionType {
     Usb,
-    /// Wi‑Fi sync; usbmuxd can tunnel to these too.
+    /// Wi-Fi sync; usbmuxd can tunnel to these too.
     Network,
     Other(String),
 }

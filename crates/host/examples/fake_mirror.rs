@@ -1,17 +1,19 @@
-//! Stand-in for the iPad broadcast extension, for testing the viewer without
-//! an iPad: serves an animated test pattern on 127.0.0.1:47801.
+//! Stand-in for the iPad broadcast extension, for testing the viewers without
+//! an iPad: serves an animated test pattern on port 47801 and announces it
+//! over Bonjour like the real extension.
 //!
-//!     cargo run -p padbridge-cli --example fake_mirror
-//!     cargo run -p padbridge-cli -- mirror 127.0.0.1
+//!     cargo run -p padbridge-host --example fake_mirror
+//!     cargo run -p padbridge-cli -- mirror 127.0.0.1     (or open PadBridge.exe)
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbSliceU8, YUVBuffer};
-use padbridge_cli::mirror::annex_b_to_avcc;
+use padbridge_host::mirror::annex_b_to_avcc;
 use padbridge_protocol::{Codec, Message, Role, MIRROR_PORT, PROTOCOL_VERSION};
 
 const W: usize = 640;
@@ -19,8 +21,21 @@ const H: usize = 480;
 const FPS: u64 = 30;
 
 fn main() {
-    let listener = TcpListener::bind(("127.0.0.1", MIRROR_PORT)).expect("bind");
-    println!("fake mirror source on 127.0.0.1:{MIRROR_PORT}");
+    let listener = TcpListener::bind(("0.0.0.0", MIRROR_PORT)).expect("bind");
+    println!("fake mirror source on port {MIRROR_PORT}");
+
+    let mdns = ServiceDaemon::new().expect("mdns");
+    let service = ServiceInfo::new(
+        "_padbridge._tcp.local.",
+        "Fake iPad Mirror",
+        "fake-ipad.local.",
+        "",
+        MIRROR_PORT,
+        &[("proto", "1"), ("role", "2")][..],
+    )
+    .expect("service info")
+    .enable_addr_auto();
+    mdns.register(service).expect("register");
     for stream in listener.incoming().flatten() {
         thread::spawn(move || {
             if let Err(e) = serve(stream) {

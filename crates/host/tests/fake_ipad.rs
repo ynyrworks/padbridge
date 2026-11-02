@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use padbridge_cli::ping_session;
+use padbridge_host::ping_session;
 use padbridge_protocol::{FrameDecoder, Message, Role, PROTOCOL_VERSION};
 
 fn fake_ipad(mut stream: TcpStream) {
