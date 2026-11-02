@@ -29,6 +29,7 @@ pub struct PadBridgeApp {
     display: Option<DisplayView>,
     monitors: Vec<Monitor>,
     monitor_index: usize,
+    allow_input: bool,
     log: VecDeque<String>,
     log_tx: Sender<String>,
     log_rx: Receiver<String>,
@@ -104,6 +105,7 @@ impl PadBridgeApp {
             display: None,
             monitors: Vec::new(),
             monitor_index: 0,
+            allow_input: true,
             log: VecDeque::new(),
             log_tx,
             log_rx,
@@ -358,6 +360,7 @@ impl PadBridgeApp {
                 self.refresh_monitors();
             }
         });
+        ui.checkbox(&mut self.allow_input, "允許 iPad 操作（觸控、Apple Pencil、觸控板）");
         let virtual_display = self.monitors.iter().any(|m| !m.primary && m.adapter.to_lowercase().contains("virtual"));
         if !virtual_display {
             ui.label(
@@ -396,7 +399,7 @@ impl PadBridgeApp {
 
     fn start_display(&mut self, title: String, transport: Transport, port: u16) {
         self.stop_sessions();
-        let settings = DisplaySettings { monitor: self.monitor_index, ..DisplaySettings::default() };
+        let settings = DisplaySettings { monitor: self.monitor_index, allow_input: self.allow_input, ..DisplaySettings::default() };
         let monitor = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.label()).unwrap_or_default();
         self.push_log(format!("延伸螢幕：{monitor} → {title}"));
         let shared = Arc::new(Mutex::new(DisplayShared::default()));

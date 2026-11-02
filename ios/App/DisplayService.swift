@@ -18,6 +18,8 @@ final class DisplayService: ObservableObject {
     @Published private(set) var log: [LogLine] = []
     /// Set while a host is streaming its screen to us; the UI then shows it full screen.
     @Published private(set) var streamInfo: String?
+    /// Size of the video being shown, for mapping touches onto the Windows screen.
+    @Published private(set) var streamSize: CGSize = .zero
 
     let receiver = VideoReceiver()
     private var server: Server?
@@ -75,6 +77,7 @@ final class DisplayService: ObservableObject {
             case let .streamConfig(codec, width, height, fps, _):
                 if streamInfo == nil { append("開始顯示：\(codec) \(width)×\(height) @\(fps)") }
                 streamInfo = "\(width)×\(height)"
+                streamSize = CGSize(width: Int(width), height: Int(height))
             default:
                 append("收到：\(message)")
             }
@@ -85,6 +88,11 @@ final class DisplayService: ObservableObject {
         case let .failed(error):
             status = "監聽失敗：\(error)"
         }
+    }
+
+    /// Sends touch / Pencil / trackpad input to the connected host.
+    func sendPointer(_ message: Message) {
+        server?.broadcast(message)
     }
 
     private func append(_ text: String) {

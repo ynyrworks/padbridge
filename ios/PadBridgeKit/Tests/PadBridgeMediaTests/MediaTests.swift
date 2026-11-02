@@ -167,6 +167,23 @@ final class MediaTests: XCTestCase {
         XCTAssertEqual(lock.withLock { decoded }, 3)
     }
 
+    func testPointerMappingWithPillarbox() throws {
+        // 16:9 video in a 4:3 view (1024x768): drawn 1024x576, centered vertically.
+        let video = CGSize(width: 1920, height: 1080)
+        let bounds = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        let rect = PointerMapping.contentRect(videoSize: video, in: bounds)
+        XCTAssertEqual(rect, CGRect(x: 0, y: 96, width: 1024, height: 576))
+
+        let center = try XCTUnwrap(PointerMapping.normalize(CGPoint(x: 512, y: 384), videoSize: video, in: bounds, clamp: false))
+        XCTAssertEqual(center.x, 0.5, accuracy: 0.001)
+        XCTAssertEqual(center.y, 0.5, accuracy: 0.001)
+
+        // In the black bar above the picture: ignored for a new touch, clamped for a drag.
+        XCTAssertNil(PointerMapping.normalize(CGPoint(x: 100, y: 20), videoSize: video, in: bounds, clamp: false))
+        let clamped = try XCTUnwrap(PointerMapping.normalize(CGPoint(x: 100, y: 20), videoSize: video, in: bounds, clamp: true))
+        XCTAssertEqual(clamped.y, 0)
+    }
+
     func testReceiverWaitsForKeyframe() {
         let receiver = VideoReceiver()
         var requests = 0

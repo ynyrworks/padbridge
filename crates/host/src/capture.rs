@@ -27,6 +27,9 @@ pub struct Monitor {
     pub device_name: String,
     /// Graphics adapter, e.g. the GPU or "Virtual Display Driver".
     pub adapter: String,
+    /// Top-left corner on the virtual desktop, in physical pixels.
+    pub left: i32,
+    pub top: i32,
     pub width: u32,
     pub height: u32,
     pub primary: bool,
@@ -82,6 +85,8 @@ fn outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput1, Monitor)>, BoxError> {
                     index: found.len(),
                     device_name: utf16(&desc.DeviceName),
                     adapter: adapter_name.clone(),
+                    left: r.left,
+                    top: r.top,
                     width: (r.right - r.left) as u32,
                     height: (r.bottom - r.top) as u32,
                     primary: r.left == 0 && r.top == 0,

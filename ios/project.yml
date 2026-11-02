@@ -36,6 +36,8 @@ targets:
         CFBundleDisplayName: PadBridge
         UILaunchScreen: {}
         UIRequiresFullScreen: true
+        # Trackpad clicks arrive as indirect-pointer touches (sent to Windows as mouse input).
+        UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight

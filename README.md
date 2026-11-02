@@ -5,7 +5,7 @@
 - **Display 模式**：iPad 當 Windows 的擴充螢幕，支援觸控與 Apple Pencil。
 - **Mirror 模式**：iPad 畫面顯示在 Windows 視窗中。
 
-> 🚧 開發中：已完成線路協定（M0）、USB usbmux 通道（M1）、iOS 骨架（M2）、Mirror 模式（M3）、Display 模式（M4）。下一步是觸控回傳（M5）。架構與里程碑見 [docs/DESIGN.md](docs/DESIGN.md)。
+> 🚧 開發中：已完成線路協定（M0）、USB usbmux 通道（M1）、iOS 骨架（M2）、Mirror 模式（M3）、Display 模式（M4）、觸控與 Apple Pencil 回傳（M5）。架構與里程碑見 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## Windows App
 
@@ -63,6 +63,9 @@ cargo run -p padbridge-cli -- ping <iPad 的 IP>
 1. 在 iPad 打開 PadBridge App，畫面保持在前景。
 2. 在 Windows 的 PadBridge App 選擇「傳送到 iPad 的螢幕」，再按該 iPad 的「🖥 延伸螢幕」。
 3. iPad 會全螢幕顯示該螢幕的畫面，滑鼠游標也會畫上去。
+4. 直接在 iPad 上操作：手指是觸控、Apple Pencil 是筆（支援壓力、傾斜，部分機型支援懸停），巧控鍵盤的觸控板是滑鼠。可在 App 中取消勾選「允許 iPad 操作」。
+
+以系統管理員身分執行的視窗（例如工作管理員）無法接收注入的輸入，這是 Windows 的安全限制；除非 PadBridge 也以系統管理員身分執行。
 
 命令列版本：
 

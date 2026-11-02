@@ -19,11 +19,13 @@ pub struct DisplaySettings {
     pub bitrate_kbps: u32,
     /// Wider screens are scaled down to this width before encoding.
     pub max_width: usize,
+    /// Inject the iPad's touches, Pencil and trackpad input into Windows.
+    pub allow_input: bool,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        Self { monitor: 0, max_fps: 60, bitrate_kbps: 10_000, max_width: 1920 }
+        Self { monitor: 0, max_fps: 60, bitrate_kbps: 10_000, max_width: 1920, allow_input: true }
     }
 }
 
@@ -265,6 +267,7 @@ mod session {
 
     use super::{DisplaySettings, VideoPipeline};
     use crate::capture::Capturer;
+    use crate::input::{Injector, InputMapper, ScreenRect};
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum DisplayEvent {
@@ -303,13 +306,17 @@ mod session {
         let mut writer = stream.try_clone()?;
         writer.write_all(&Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() }.to_frame()?)?;
 
+        let mut capturer = Capturer::new(settings.monitor)?;
+        let monitor = capturer.monitor().label();
+        let input_rect = settings.allow_input.then(|| {
+            let m = capturer.monitor();
+            ScreenRect { left: m.left, top: m.top, width: m.width, height: m.height }
+        });
+
         let want_keyframe = Arc::new(AtomicBool::new(true));
         let (events_tx, events_rx) = mpsc::channel();
         let reader_keyframe = want_keyframe.clone();
-        thread::spawn(move || read_peer(stream, reader_keyframe, events_tx));
-
-        let mut capturer = Capturer::new(settings.monitor)?;
-        let monitor = capturer.monitor().label();
+        thread::spawn(move || read_peer(stream, reader_keyframe, input_rect, events_tx));
         let interval = Duration::from_secs_f64(1.0 / f64::from(settings.max_fps.max(1)));
         let mut pipeline = VideoPipeline::new(settings)?;
         let mut announced = None;
@@ -377,8 +384,23 @@ mod session {
         }
     }
 
-    /// Reads the iPad's messages. Sends `None` when the connection ends.
-    fn read_peer(mut stream: TcpStream, want_keyframe: Arc<AtomicBool>, events: mpsc::Sender<Option<DisplayEvent>>) {
+    /// Reads the iPad's messages and injects its input when `input_rect` is
+    /// set. Sends `None` when the connection ends.
+    fn read_peer(
+        mut stream: TcpStream,
+        want_keyframe: Arc<AtomicBool>,
+        input_rect: Option<ScreenRect>,
+        events: mpsc::Sender<Option<DisplayEvent>>,
+    ) {
+        let mut mapper = InputMapper::new();
+        let injector = input_rect.and_then(|_| match Injector::new() {
+            Ok(injector) => Some(injector),
+            Err(e) => {
+                let _ = events.send(Some(DisplayEvent::Log(format!("無法啟用觸控輸入：{e}"))));
+                None
+            }
+        });
+        let mut reported_injection_error = false;
         let mut decoder = FrameDecoder::new();
         let mut buf = [0u8; 4096];
         loop {
@@ -396,6 +418,19 @@ mod session {
                     Ok(Some(Message::Log { text, .. })) => DisplayEvent::Log(text),
                     Ok(Some(Message::RequestKeyframe)) => {
                         want_keyframe.store(true, Ordering::Relaxed);
+                        continue;
+                    }
+                    Ok(Some(msg @ Message::Pointer { .. })) => {
+                        let (Some(rect), Some(injector)) = (input_rect, &injector) else { continue };
+                        for action in mapper.handle(&msg, rect) {
+                            if let Err(e) = injector.apply(&action) {
+                                if !reported_injection_error {
+                                    reported_injection_error = true;
+                                    // Typically: the target window runs as administrator.
+                                    let _ = events.send(Some(DisplayEvent::Log(format!("輸入注入失敗：{e}"))));
+                                }
+                            }
+                        }
                         continue;
                     }
                     Ok(Some(Message::Bye)) | Err(_) => {

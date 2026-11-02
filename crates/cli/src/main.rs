@@ -124,7 +124,7 @@ fn ping(target: &str, count: u32) -> CliResult {
 
 fn monitors() -> CliResult {
     for m in list_monitors()? {
-        println!("{}  {}", m.index, m.label());
+        println!("{}  {}  @({}, {})", m.index, m.label(), m.left, m.top);
     }
     println!("\n要讓 iPad 當「延伸」螢幕，請先安裝虛擬顯示器驅動，再選它新增的螢幕。");
     Ok(ExitCode::SUCCESS)

@@ -129,6 +129,23 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
   - 改用 Media Foundation 或 NVENC 硬體編碼。
   - 讓 iPad 支援 High profile 與 HEVC。
 
+### 4.3 觸控回傳實作（M5）
+
+- iPad：影像畫面上的 `UIView` 收集觸控事件，送出 `Pointer` 訊息。
+  - 用 coalesced touches 取得 Pencil 的 120–240 Hz 取樣。
+  - `UIHoverGestureRecognizer` 處理 Pencil 懸停與觸控板游標。
+  - 座標透過 `PointerMapping`，換算成 aspect-fit 影像內的 0..1 座標：新的觸控落在黑邊會忽略；拖曳超出畫面則固定在邊緣。
+  - 開啟 `UIApplicationSupportsIndirectInputEvents`，讓觸控板點擊成為 indirect pointer，送到 Windows 當滑鼠。
+- Windows：`input::InputMapper` 是與平台無關的狀態機，有單元測試。
+  - 觸控每一幀都要列出所有接觸點（Windows 規定），接觸點編號用 0–9 的槽位。
+  - Pencil 抬起後會再送一次「離開範圍」。
+  - 傾斜角由 altitude 和 azimuth 換算。
+  - `input::Injector` 用 `CreateSyntheticPointerDevice` 加 `InjectSyntheticPointerInput`（Windows 10 1809+）注入觸控與筆；滑鼠用 `SetCursorPos` 加 `SendInput`。
+- 座標對應到被擷取螢幕的實體像素矩形（`Monitor.left/top`）。
+- 限制：
+  - UIPI 會阻擋注入到以系統管理員身分執行的視窗。
+  - 筆和滑鼠同時使用時，順序無法保證（指標注入是非同步的）。
+
 ## 5. 平台限制與因應
 
 ### 5.1 iPad 端：沒有 Mac 的開發流程

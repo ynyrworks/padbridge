@@ -10,10 +10,15 @@ use std::net::TcpListener;
 use std::time::Instant;
 
 use padbridge_host::mirror::{Frame, MirrorDecoder};
-use padbridge_protocol::{Codec, FrameDecoder, Message, Role, DISPLAY_PORT, PROTOCOL_VERSION};
+use padbridge_protocol::{Codec, FrameDecoder, Message, Phase, PointerKind, Role, DISPLAY_PORT, PROTOCOL_VERSION};
 
 fn main() {
-    let png_path = std::env::args().nth(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--input-test`: after the first frame, send harmless input (Pencil hover,
+    // then a trackpad-style pointer move to 25%/25% of the screen). No clicks.
+    let input_test = args.iter().any(|a| a == "--input-test");
+    let png_path = args.into_iter().find(|a| !a.starts_with("--"));
+    let mut input_sent = false;
     let listener = TcpListener::bind(("127.0.0.1", DISPLAY_PORT)).expect("bind");
     println!("fake iPad display on 127.0.0.1:{DISPLAY_PORT}");
     for stream in listener.incoming() {
@@ -51,6 +56,25 @@ fn main() {
                     Ok(Some(frame)) => {
                         count += 1;
                         last = Some(frame);
+                        if input_test && !input_sent {
+                            input_sent = true;
+                            let pointer = |kind, phase, x, y| Message::Pointer {
+                                id: 0,
+                                kind,
+                                phase,
+                                x,
+                                y,
+                                pressure: 0.0,
+                                altitude: 1.2,
+                                azimuth: 0.5,
+                            };
+                            for x in [0.5, 0.55, 0.6] {
+                                let _ = send(&mut stream, pointer(PointerKind::Pen, Phase::Hover, x, 0.5));
+                            }
+                            let _ = send(&mut stream, pointer(PointerKind::Pen, Phase::Cancel, 0.6, 0.5));
+                            let _ = send(&mut stream, pointer(PointerKind::Mouse, Phase::Hover, 0.25, 0.25));
+                            println!("sent input test");
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => {

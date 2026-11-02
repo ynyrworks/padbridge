@@ -4,6 +4,7 @@
 pub mod capture;
 pub mod discovery;
 pub mod display;
+pub mod input;
 pub mod mirror;
 pub mod session;
 pub mod target;
