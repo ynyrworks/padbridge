@@ -56,7 +56,10 @@ targets:
         product: PadBridgeProtocol
       - package: PadBridgeKit
         product: PadBridgeNet
+      - package: PadBridgeKit
+        product: PadBridgeMedia
       - sdk: ReplayKit.framework
+      - sdk: VideoToolbox.framework
     info:
       path: Generated/Broadcast-Info.plist
       properties:

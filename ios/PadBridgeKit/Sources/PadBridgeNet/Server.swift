@@ -72,6 +72,53 @@ public final class Server: @unchecked Sendable {
         }
     }
 
+    /// Called (on the server queue) when a greeted peer needs a keyframe: it just
+    /// said Hello, sent `RequestKeyframe`, or fell behind and had frames dropped.
+    public var onKeyframeNeeded: (() -> Void)?
+
+    /// A peer with this many unsent messages is considered backed up.
+    public var maxPendingSends = 6
+
+    /// Sends one encoded frame (plus, for keyframes, its preceding config
+    /// messages) to every greeted peer. Peers that are backed up or waiting
+    /// for a keyframe skip delta frames instead of queueing them, which keeps
+    /// latency bounded on slow links.
+    public func broadcastVideo(_ messages: [Message], keyframe: Bool) {
+        queue.async { [self] in
+            var needKeyframe = false
+            for peer in peers where greeted.contains(ObjectIdentifier(peer)) {
+                let id = ObjectIdentifier(peer)
+                let backedUp = peer.pendingSends >= maxPendingSends
+                if keyframe && peer.pendingSends < maxPendingSends * 2 {
+                    awaitingKeyframe.remove(id)
+                } else if keyframe || awaitingKeyframe.contains(id) || backedUp {
+                    awaitingKeyframe.insert(id)
+                    needKeyframe = true
+                    continue
+                }
+                for message in messages { peer.send(message) }
+            }
+            if keyframe { keyframeRequested = false }
+            if needKeyframe { requestKeyframe() }
+        }
+    }
+
+    private var greeted = Set<ObjectIdentifier>()
+    private var awaitingKeyframe = Set<ObjectIdentifier>()
+    private var keyframeRequested = false
+
+    private func requestKeyframe() {
+        guard !keyframeRequested else { return }
+        keyframeRequested = true
+        onKeyframeNeeded?()
+    }
+
+    private func markAwaitingKeyframe(_ peer: PeerConnection) {
+        awaitingKeyframe.insert(ObjectIdentifier(peer))
+        keyframeRequested = false
+        requestKeyframe()
+    }
+
     private func accept(_ connection: NWConnection) {
         let peer = PeerConnection(connection: connection, queue: queue)
         peers.append(peer)
@@ -87,6 +134,8 @@ public final class Server: @unchecked Sendable {
         peer.onClose = { [weak self, weak peer] error in
             guard let self, let peer else { return }
             peers.removeAll { $0 === peer }
+            greeted.remove(ObjectIdentifier(peer))
+            awaitingKeyframe.remove(ObjectIdentifier(peer))
             onEvent?(.disconnected(peer, error))
         }
         peer.start()
@@ -100,7 +149,11 @@ public final class Server: @unchecked Sendable {
                 peer.sayGoodbye()
                 return
             }
+            greeted.insert(ObjectIdentifier(peer))
             onEvent?(.hello(peer, name: name, role: role))
+            markAwaitingKeyframe(peer)
+        case .requestKeyframe:
+            markAwaitingKeyframe(peer)
         case let .ping(nonce, tUs):
             peer.send(.pong(nonce: nonce, tUs: tUs))
         case .bye:

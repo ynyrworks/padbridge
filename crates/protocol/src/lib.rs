@@ -92,6 +92,8 @@ pub enum Message {
     VideoFrame {
         pts_us: u64,
         keyframe: bool,
+        /// Clockwise quarter turns (0..=3) the receiver applies to show the frame upright.
+        rotation: u8,
         data: Vec<u8>,
     },
     RequestKeyframe,
@@ -173,9 +175,9 @@ impl Message {
                 w.u8(*codec as u8);
                 w.bytes(data);
             }
-            Message::VideoFrame { pts_us, keyframe, data } => {
+            Message::VideoFrame { pts_us, keyframe, rotation, data } => {
                 w.u64(*pts_us);
-                w.u8(*keyframe as u8);
+                w.u8(*keyframe as u8 | (rotation & 3) << 1);
                 w.bytes(data);
             }
             Message::Pointer { id, kind, phase, x, y, pressure, altitude, azimuth } => {
@@ -253,11 +255,11 @@ impl Message {
                 bitrate_kbps: r.u32()?,
             },
             kind::CODEC_PARAMS => Message::CodecParams { codec: r.u8()?.try_into()?, data: r.rest() },
-            kind::VIDEO_FRAME => Message::VideoFrame {
-                pts_us: r.u64()?,
-                keyframe: r.u8()? & 1 != 0,
-                data: r.rest(),
-            },
+            kind::VIDEO_FRAME => {
+                let pts_us = r.u64()?;
+                let flags = r.u8()?;
+                Message::VideoFrame { pts_us, keyframe: flags & 1 != 0, rotation: (flags >> 1) & 3, data: r.rest() }
+            }
             kind::REQUEST_KEYFRAME => Message::RequestKeyframe,
             kind::POINTER => Message::Pointer {
                 id: r.u32()?,

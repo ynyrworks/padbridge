@@ -12,8 +12,8 @@ fn samples() -> Vec<Message> {
         },
         Message::StreamConfig { codec: Codec::Hevc, width: 2732, height: 2048, fps: 60, bitrate_kbps: 20_000 },
         Message::CodecParams { codec: Codec::H264, data: vec![0, 0, 0, 2, 0x67, 0x42] },
-        Message::VideoFrame { pts_us: 1_234_567, keyframe: true, data: vec![0, 0, 0, 1, 0x65] },
-        Message::VideoFrame { pts_us: 1_250_000, keyframe: false, data: vec![] },
+        Message::VideoFrame { pts_us: 1_234_567, keyframe: true, rotation: 3, data: vec![0, 0, 0, 1, 0x65] },
+        Message::VideoFrame { pts_us: 1_250_000, keyframe: false, rotation: 1, data: vec![] },
         Message::RequestKeyframe,
         Message::Pointer {
             id: 7,

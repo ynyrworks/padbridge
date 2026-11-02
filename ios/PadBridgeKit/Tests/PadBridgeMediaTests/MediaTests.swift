@@ -1,0 +1,127 @@
+import CoreMedia
+import CoreVideo
+import XCTest
+import PadBridgeNet
+import PadBridgeProtocol
+@testable import PadBridgeMedia
+
+/// Splits AVCC data (4-byte big-endian length prefixes) into NAL units.
+func nalUnits(_ data: [UInt8]) -> [[UInt8]]? {
+    var units: [[UInt8]] = []
+    var i = 0
+    while i < data.count {
+        guard i + 4 <= data.count else { return nil }
+        let length = data[i..<i + 4].reduce(0) { $0 << 8 | Int($1) }
+        guard i + 4 + length <= data.count else { return nil }
+        units.append(Array(data[i + 4..<i + 4 + length]))
+        i += 4 + length
+    }
+    return units
+}
+
+/// A 4:2:0 full-range buffer like ReplayKit delivers, filled with a moving gradient.
+func makePixelBuffer(width: Int, height: Int, seed: Int) -> CVPixelBuffer {
+    var buffer: CVPixelBuffer?
+    let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]] as CFDictionary
+    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, attributes, &buffer)
+    let pb = buffer!
+    CVPixelBufferLockBaseAddress(pb, [])
+    for plane in 0..<CVPixelBufferGetPlaneCount(pb) {
+        let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane)!.assumingMemoryBound(to: UInt8.self)
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pb, plane)
+        for y in 0..<CVPixelBufferGetHeightOfPlane(pb, plane) {
+            for x in 0..<rowBytes { base[y * rowBytes + x] = UInt8(truncatingIfNeeded: x + y + seed * 8) }
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, [])
+    return pb
+}
+
+final class MediaTests: XCTestCase {
+    func testTargetSize() {
+        XCTAssertTrue(VideoEncoder.targetSize(width: 2732, height: 2048, maxLongEdge: 1920) == (1920, 1438))
+        XCTAssertTrue(VideoEncoder.targetSize(width: 2048, height: 2732, maxLongEdge: 1920) == (1438, 1920))
+        XCTAssertTrue(VideoEncoder.targetSize(width: 1280, height: 720, maxLongEdge: 1920) == (1280, 720))
+    }
+
+    func testEncodesH264WithParameterSets() throws {
+        var settings = VideoEncoder.Settings()
+        settings.maxLongEdge = 640
+        let encoder = VideoEncoder(settings: settings)
+        var frames: [EncodedFrame] = []
+        let lock = NSLock()
+        encoder.onFrame = { frame in lock.withLock { frames.append(frame) } }
+
+        // Larger than maxLongEdge, so this also exercises scaling.
+        for i in 0..<5 {
+            try encoder.encode(makePixelBuffer(width: 1280, height: 960, seed: i),
+                               pts: CMTime(value: CMTimeValue(i), timescale: 60), rotation: 1)
+        }
+        encoder.flush()
+
+        let got = lock.withLock { frames }
+        XCTAssertFalse(got.isEmpty)
+        let first = try XCTUnwrap(got.first)
+        XCTAssertTrue(first.keyframe)
+        XCTAssertEqual(first.width, 640)
+        XCTAssertEqual(first.height, 480)
+        XCTAssertEqual(first.rotation, 1)
+        let parameterSets = try XCTUnwrap(nalUnits(try XCTUnwrap(first.parameterSets)))
+        XCTAssertEqual(parameterSets.map { $0[0] & 0x1F }, [7, 8], "expected SPS then PPS")
+        for frame in got {
+            let units = try XCTUnwrap(nalUnits(frame.data), "frame data is not valid AVCC")
+            XCTAssertFalse(units.isEmpty)
+        }
+        XCTAssertEqual(got.filter(\.keyframe).count, 1)
+    }
+
+    func testRequestedKeyframe() throws {
+        let encoder = VideoEncoder()
+        var keyframes = 0
+        let lock = NSLock()
+        encoder.onFrame = { frame in lock.withLock { if frame.keyframe { keyframes += 1 } } }
+        for i in 0..<4 {
+            if i == 2 { encoder.requestKeyframe() }
+            try encoder.encode(makePixelBuffer(width: 320, height: 240, seed: i), pts: CMTime(value: CMTimeValue(i), timescale: 60))
+        }
+        encoder.flush()
+        XCTAssertEqual(lock.withLock { keyframes }, 2)
+    }
+
+    /// A host connecting to a static screen still gets a keyframe: the
+    /// streamer re-encodes the last captured frame.
+    func testStreamerSendsKeyframeToNewHost() throws {
+        let streamer = MirrorStreamer(name: "Test Mirror", port: 0, advertise: false)
+        let ready = expectation(description: "listener ready")
+        var port: UInt16 = 0
+        streamer.server.onEvent = { event in
+            if case let .ready(p) = event {
+                port = p
+                ready.fulfill()
+            }
+        }
+        try streamer.start()
+        wait(for: [ready], timeout: 5)
+        try streamer.process(makePixelBuffer(width: 320, height: 240, seed: 0), pts: CMTime(value: 0, timescale: 60), rotation: 0)
+
+        let gotConfig = expectation(description: "stream config")
+        let gotParams = expectation(description: "codec params")
+        let gotKeyframe = expectation(description: "keyframe")
+        for e in [gotConfig, gotParams, gotKeyframe] { e.assertForOverFulfill = false }
+        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"))
+        client.onReady = { client.send(.hello(version: Wire.protocolVersion, role: .host, name: "Test PC")) }
+        client.onMessage = { message in
+            switch message {
+            case .streamConfig(.h264, 320, 240, _, _): gotConfig.fulfill()
+            case let .codecParams(.h264, data) where !data.isEmpty: gotParams.fulfill()
+            case .videoFrame(_, true, 0, _): gotKeyframe.fulfill()
+            default: break
+            }
+        }
+        client.start()
+        wait(for: [gotConfig, gotParams, gotKeyframe], timeout: 10, enforceOrder: true)
+
+        client.close()
+        streamer.stop()
+    }
+}

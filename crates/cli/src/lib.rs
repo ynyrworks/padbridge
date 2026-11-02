@@ -1,5 +1,7 @@
 //! Host-side test session: handshake with an iPad and measure round-trip time.
 
+pub mod mirror;
+
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;

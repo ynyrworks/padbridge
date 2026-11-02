@@ -11,5 +11,7 @@ name = "padbridge"
 path = "src/main.rs"
 
 [dependencies]
+minifb = "0.29.0"
+openh264 = "0.9.9"
 padbridge-protocol = { path = "../protocol" }
 padbridge-usbmux = { path = "../usbmux" }

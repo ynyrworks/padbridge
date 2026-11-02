@@ -50,7 +50,8 @@ public enum Message: Equatable, Sendable {
     /// Parameter sets, each prefixed by a big-endian u32 length.
     case codecParams(codec: Codec, data: [UInt8])
     /// AVCC NAL units (big-endian u32 length prefixes).
-    case videoFrame(ptsUs: UInt64, keyframe: Bool, data: [UInt8])
+    /// `rotation`: clockwise quarter turns (0...3) the receiver applies to show the frame upright.
+    case videoFrame(ptsUs: UInt64, keyframe: Bool, rotation: UInt8, data: [UInt8])
     case requestKeyframe
     /// `x`/`y` are normalized to the video frame (0...1); angles are radians.
     case pointer(id: UInt32, kind: PointerKind, phase: Phase, x: Float, y: Float,
@@ -135,9 +136,9 @@ extension Message {
         case let .codecParams(codec, data):
             w.u8(codec.rawValue)
             w.append(data)
-        case let .videoFrame(ptsUs, keyframe, data):
+        case let .videoFrame(ptsUs, keyframe, rotation, data):
             w.u64(ptsUs)
-            w.u8(keyframe ? 1 : 0)
+            w.u8((keyframe ? 1 : 0) | (rotation & 3) << 1)
             w.append(data)
         case let .pointer(id, kind, phase, x, y, pressure, altitude, azimuth):
             w.u32(id)
@@ -178,7 +179,9 @@ extension Message {
         case Kind.codecParams:
             message = .codecParams(codec: try r.enumValue(), data: r.rest())
         case Kind.videoFrame:
-            message = .videoFrame(ptsUs: try r.u64(), keyframe: try r.u8() & 1 != 0, data: r.rest())
+            let ptsUs = try r.u64()
+            let flags = try r.u8()
+            message = .videoFrame(ptsUs: ptsUs, keyframe: flags & 1 != 0, rotation: (flags >> 1) & 3, data: r.rest())
         case Kind.requestKeyframe:
             message = .requestKeyframe
         case Kind.pointer:

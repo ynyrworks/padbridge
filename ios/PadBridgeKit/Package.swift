@@ -7,11 +7,14 @@ let package = Package(
     products: [
         .library(name: "PadBridgeProtocol", targets: ["PadBridgeProtocol"]),
         .library(name: "PadBridgeNet", targets: ["PadBridgeNet"]),
+        .library(name: "PadBridgeMedia", targets: ["PadBridgeMedia"]),
     ],
     targets: [
         .target(name: "PadBridgeProtocol"),
         .target(name: "PadBridgeNet", dependencies: ["PadBridgeProtocol"]),
+        .target(name: "PadBridgeMedia", dependencies: ["PadBridgeNet", "PadBridgeProtocol"]),
         .testTarget(name: "PadBridgeProtocolTests", dependencies: ["PadBridgeProtocol"]),
         .testTarget(name: "PadBridgeNetTests", dependencies: ["PadBridgeNet"]),
+        .testTarget(name: "PadBridgeMediaTests", dependencies: ["PadBridgeMedia"]),
     ]
 )

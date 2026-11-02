@@ -68,7 +68,7 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 | 0x02 | DisplayInfo | width_px u32 · height_px u32 · scale_milli u16 · max_fps u16 · codecs u8(bitmask) |
 | 0x03 | StreamConfig | codec u8 · width u32 · height u32 · fps u16 · bitrate_kbps u32 |
 | 0x10 | CodecParams | codec u8 · 參數集（每個 NAL 前置 u32 **big-endian** 長度）至訊框結尾 |
-| 0x11 | VideoFrame | pts_us u64 · flags u8(bit0=keyframe) · AVCC NALs 至訊框結尾 |
+| 0x11 | VideoFrame | pts_us u64 · flags u8(bit0=keyframe, bit1-2=順時針旋轉 90° 次數) · AVCC NALs 至訊框結尾 |
 | 0x12 | RequestKeyframe | — |
 | 0x20 | Pointer | id u32 · kind u8 · phase u8 · x f32 · y f32 · pressure f32 · altitude f32 · azimuth f32 |
 | 0x30 | Ping | nonce u64 · t_us u64 |
@@ -98,6 +98,19 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 - iPad 端以 `AVSampleBufferDisplayLayer` 加上 `kCMSampleAttachmentKey_DisplayImmediately` 立即顯示，不排隊。
 - 用 `Ping` / `Pong` 量 RTT，並顯示在除錯面板。
 - 初始目標：USB 1080p60 的單向延遲 < 50 ms；Wi‑Fi < 80 ms。
+
+### 4.1 Mirror 模式實作（M3）
+
+- iPad：廣播擴充把 ReplayKit 的每一幀交給 `MirrorStreamer`（`PadBridgeKit/PadBridgeMedia`）。
+  - 超過 1920 px 的畫面先用 `VTPixelTransferSession` 縮小，再交給 `VTCompressionSession` 編碼。
+  - 每個關鍵幀前都會附上 `StreamConfig` 和 `CodecParams`。
+  - 旋轉方向取自 `RPVideoSampleOrientationKey`，放在 `VideoFrame` 的 flags 裡。
+- 背壓：`Server.broadcastVideo` 對「積壓 ≥ 6 則訊息」或「正在等關鍵幀」的連線直接丟棄差異幀，並要求編碼器產生關鍵幀。
+- 靜止畫面：新連線加入，或收到 `RequestKeyframe` 時，如果 ReplayKit 沒有送新幀，就用最後一幀重新編碼成關鍵幀。
+- Windows：`padbridge mirror` 用 OpenH264 解碼（目前只保證支援 Constrained Baseline），再用 minifb 顯示；解碼失敗時會送 `RequestKeyframe`。
+- 待辦：
+  - 改用 Media Foundation 硬體解碼加 D3D11 顯示，支援 High profile 與 HEVC。
+  - 改用 Cisco 發佈的 OpenH264 二進位檔，以涵蓋 H.264 專利授權。
 
 ## 5. 平台限制與因應
 

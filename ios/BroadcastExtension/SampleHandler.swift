@@ -1,4 +1,5 @@
-import PadBridgeNet
+import ImageIO
+import PadBridgeMedia
 import PadBridgeProtocol
 import ReplayKit
 import UIKit
@@ -7,33 +8,49 @@ import UIKit
 /// broadcast runs; the Windows host connects to it directly. No App Group is
 /// used, so it works with free Apple ID provisioning.
 ///
-/// M2: handshake only. Encoding samples with VideoToolbox comes in M3.
+/// Extensions are limited to roughly 50 MB of memory, so frames go straight
+/// into the hardware encoder and are capped at 1920 px on the long edge.
 final class SampleHandler: RPBroadcastSampleHandler {
-    private var server: Server?
-    private var frameCount: UInt64 = 0
+    private var streamer: MirrorStreamer?
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-        let server = Server(role: .mirrorSource, name: "\(UIDevice.current.name) Mirror", port: Wire.mirrorPort)
-        server.onEvent = { event in
+        let streamer = MirrorStreamer(name: "\(UIDevice.current.name) Mirror")
+        streamer.server.onEvent = { event in
             if case let .connected(peer) = event {
-                peer.send(.log(level: 1, text: "mirror source ready; video arrives in M3"))
+                peer.send(.log(level: 1, text: "mirror source ready"))
             }
         }
         do {
-            try server.start()
-            self.server = server
+            try streamer.start()
+            self.streamer = streamer
         } catch {
             finishBroadcastWithError(error)
         }
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        guard sampleBufferType == .video else { return }
-        frameCount += 1
+        guard sampleBufferType == .video, let streamer,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        try? streamer.process(pixelBuffer, pts: pts, rotation: Self.rotation(of: sampleBuffer))
     }
 
     override func broadcastFinished() {
-        server?.stop()
-        server = nil
+        streamer?.stop()
+        streamer = nil
+    }
+
+    /// Clockwise quarter turns needed to show the frame upright, from the
+    /// orientation ReplayKit attaches to each buffer.
+    static func rotation(of sampleBuffer: CMSampleBuffer) -> UInt8 {
+        let value = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil)
+        guard let raw = (value as? NSNumber)?.uint32Value,
+              let orientation = CGImagePropertyOrientation(rawValue: raw) else { return 0 }
+        switch orientation {
+        case .right, .rightMirrored: return 1
+        case .down, .downMirrored: return 2
+        case .left, .leftMirrored: return 3
+        default: return 0
+        }
     }
 }

@@ -40,10 +40,17 @@ public final class PeerConnection: @unchecked Sendable {
         receive()
     }
 
+    /// Messages handed to the network stack but not yet sent. Only touch on the queue.
+    public private(set) var pendingSends = 0
+
+    /// Must be called on the queue passed to `init`.
     public func send(_ message: Message, then completion: (() -> Void)? = nil) {
         guard !closed, let frame = try? message.frame() else { return }
+        pendingSends += 1
         connection.send(content: Data(frame), completion: .contentProcessed { [weak self] error in
-            if let error { self?.close(error) } else { completion?() }
+            guard let self else { return }
+            pendingSends -= 1
+            if let error { close(error) } else { completion?() }
         })
     }
 
