@@ -41,15 +41,17 @@ final class SampleHandler: RPBroadcastSampleHandler {
     }
 
     /// Clockwise quarter turns needed to show the frame upright, from the
-    /// orientation ReplayKit attaches to each buffer.
+    /// orientation ReplayKit attaches to each buffer. ReplayKit's value is the
+    /// opposite of the EXIF meaning (verified on an iPad: `.left` needs a
+    /// clockwise turn), hence `.left` → 1 and `.right` → 3.
     static func rotation(of sampleBuffer: CMSampleBuffer) -> UInt8 {
         let value = CMGetAttachment(sampleBuffer, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil)
         guard let raw = (value as? NSNumber)?.uint32Value,
               let orientation = CGImagePropertyOrientation(rawValue: raw) else { return 0 }
         switch orientation {
-        case .right, .rightMirrored: return 1
+        case .left, .leftMirrored: return 1
         case .down, .downMirrored: return 2
-        case .left, .leftMirrored: return 3
+        case .right, .rightMirrored: return 3
         default: return 0
         }
     }

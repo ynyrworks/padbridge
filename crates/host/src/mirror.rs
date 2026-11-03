@@ -1,9 +1,12 @@
 //! Mirror mode, host side: receives the iPad's video stream and turns it into
 //! RGB frames.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::mpsc;
+use std::thread;
 
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
@@ -41,21 +44,51 @@ pub fn run_mirror(
         Ok(d) => d,
         Err(e) => return on_event(MirrorEvent::Ended(format!("無法初始化解碼器：{e}"))),
     };
-    let mut frames = FrameDecoder::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = match stream.read(&mut buf) {
-            Ok(0) => return on_event(MirrorEvent::Ended("iPad 已中斷連線".into())),
-            Ok(n) => n,
-            Err(e) => return on_event(MirrorEvent::Ended(format!("連線結束：{e}"))),
-        };
-        frames.push(&buf[..n]);
+
+    // Reading runs on its own thread so a backlog is visible here: every frame
+    // must be decoded (later ones reference it), but only the newest one in the
+    // queue is converted and shown, which keeps latency flat when the viewer
+    // is slower than the iPad's frame rate.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut frames = FrameDecoder::new();
+        let mut buf = vec![0u8; 256 * 1024];
         loop {
-            let msg = match frames.next_message() {
-                Ok(Some(msg)) => msg,
-                Ok(None) => break,
-                Err(e) => return on_event(MirrorEvent::Ended(format!("協定錯誤：{e}"))),
+            let n = match stream.read(&mut buf) {
+                Ok(0) => return tx.send(Err("iPad 已中斷連線".to_string())),
+                Ok(n) => n,
+                Err(e) => return tx.send(Err(format!("連線結束：{e}"))),
             };
+            frames.push(&buf[..n]);
+            loop {
+                match frames.next_message() {
+                    Ok(Some(msg)) => {
+                        if tx.send(Ok(msg)).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => return tx.send(Err(format!("協定錯誤：{e}"))),
+                }
+            }
+        }
+    });
+
+    let mut queue = VecDeque::new();
+    loop {
+        if queue.is_empty() {
+            match rx.recv() {
+                Ok(item) => queue.push_back(item),
+                Err(_) => return on_event(MirrorEvent::Ended("連線結束".into())),
+            }
+        }
+        queue.extend(rx.try_iter());
+        while let Some(item) = queue.pop_front() {
+            let msg = match item {
+                Ok(msg) => msg,
+                Err(reason) => return on_event(MirrorEvent::Ended(reason)),
+            };
+            let newest = !queue.iter().any(|m| matches!(m, Ok(Message::VideoFrame { .. })));
             match &msg {
                 Message::Hello { name, .. } => on_event(MirrorEvent::Connected { name: name.clone() }),
                 Message::StreamConfig { codec, width, height, fps, bitrate_kbps } => on_event(MirrorEvent::Stream {
@@ -69,7 +102,7 @@ pub fn run_mirror(
                 Message::Bye => return on_event(MirrorEvent::Ended("iPad 結束廣播".into())),
                 _ => {}
             }
-            match decoder.handle(&msg) {
+            match decoder.handle_frame(&msg, newest) {
                 Ok(Some(frame)) => {
                     if !on_frame(frame) {
                         let _ = send(Message::Bye);
@@ -139,6 +172,12 @@ impl MirrorDecoder {
     /// Feeds one message. Returns a frame when one was decoded. After an
     /// error, the caller should send `RequestKeyframe`.
     pub fn handle(&mut self, msg: &Message) -> Result<Option<Frame>, MirrorError> {
+        self.handle_frame(msg, true)
+    }
+
+    /// Like [`handle`](Self::handle), but with `want_image` false a video
+    /// frame is only decoded (to keep the reference chain), not converted.
+    pub fn handle_frame(&mut self, msg: &Message, want_image: bool) -> Result<Option<Frame>, MirrorError> {
         match msg {
             Message::StreamConfig { codec, .. } | Message::CodecParams { codec, .. } if *codec != Codec::H264 => {
                 Err(MirrorError::UnsupportedCodec(*codec))
@@ -151,7 +190,7 @@ impl MirrorDecoder {
                 if !keyframe && self.waiting_for_keyframe {
                     return Ok(None);
                 }
-                let result = self.decode(*pts_us, *keyframe, *rotation, data);
+                let result = self.decode(*pts_us, *keyframe, *rotation, data, want_image);
                 self.waiting_for_keyframe = result.is_err();
                 result
             }
@@ -159,10 +198,20 @@ impl MirrorDecoder {
         }
     }
 
-    fn decode(&mut self, pts_us: u64, keyframe: bool, rotation: u8, data: &[u8]) -> Result<Option<Frame>, MirrorError> {
+    fn decode(
+        &mut self,
+        pts_us: u64,
+        keyframe: bool,
+        rotation: u8,
+        data: &[u8],
+        want_image: bool,
+    ) -> Result<Option<Frame>, MirrorError> {
         let mut packet = if keyframe { self.params.clone() } else { Vec::new() };
         packet.extend(avcc_to_annex_b(data).ok_or(MirrorError::BadAvcc)?);
         let Some(yuv) = self.decoder.decode(&packet).map_err(MirrorError::Decode)? else { return Ok(None) };
+        if !want_image {
+            return Ok(None);
+        }
 
         let (width, height) = yuv.dimensions();
         self.rgba.resize(width * height * 4, 0);
