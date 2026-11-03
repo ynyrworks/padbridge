@@ -78,6 +78,7 @@ record       = 長度 u32 LE · ChaCha20-Poly1305(key, nonce = 0u32 · counter u
 - `DisplayEvent::Ended` / `MirrorEvent::Ended` 帶 `lost`：連線中斷（socket 錯誤、對方關閉、廣播結束）為 true；使用者停止、擷取／編碼錯誤、配對被拒為 false。
 - App 對 `lost` 的工作階段每 2～10 秒重試，USB 裝置以序號（UDID）辨識，所以重新插上後 usbmux id 改變也找得到。
 - iPad App 回到前景時，若監聽已失效就重新啟動。
+- USB ⇄ Wi‑Fi 切換：Bonjour TXT 的 `id` 是 iPad 身分公鑰的前 8 bytes（hex）。Windows 連上後記住「USB 端點 → 指紋」；原端點消失而同一指紋的另一條路存在時，0.3 秒後就改走那條路；連在 Wi‑Fi 時若同一台 iPad 的 USB 出現，就切回 USB。
 
 ## 3. 線路協定（`crates/protocol`）
 

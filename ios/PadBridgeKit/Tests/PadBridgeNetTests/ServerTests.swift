@@ -91,6 +91,11 @@ final class ServerTests: XCTestCase {
         server.stop()
     }
 
+    func testDeviceIDMatchesRust() {
+        // Same as `secure::device_id` in crates/host/src/secure.rs.
+        XCTAssertEqual(Server.deviceID(Array(1...32)), "0102030405060708")
+    }
+
     func testTxtRecordEncoding() {
         let data = Server.txtRecord(["role": "1", "proto": "1"])
         XCTAssertEqual(Array(data), [7] + Array("proto=1".utf8) + [6] + Array("role=1".utf8))

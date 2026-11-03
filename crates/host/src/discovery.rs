@@ -24,6 +24,9 @@ pub struct Endpoint {
     /// Known for Bonjour services; for USB the caller picks the port per mode.
     pub port: Option<u16>,
     pub role: Option<Role>,
+    /// The iPad's identity fingerprint (`secure::device_id`), advertised over
+    /// Bonjour; unknown for USB until connected.
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +62,7 @@ impl Discovery {
                                         .get_property_val_str("role")
                                         .and_then(|r| r.parse::<u8>().ok())
                                         .and_then(|r| Role::try_from(r).ok()),
+                                    device_id: info.get_property_val_str("id").map(str::to_string),
                                 }))
                             }
                             ServiceEvent::ServiceRemoved(_, fullname) => Some(DiscoveryEvent::Removed { key: fullname }),
@@ -123,6 +127,7 @@ fn spawn_usb(tx: Sender<DiscoveryEvent>) {
                                     transport: Transport::Usb { device_id: d.device_id },
                                     port: None,
                                     role: None,
+                                    device_id: None,
                                 })
                             }
                             Ok(DeviceEvent::Detached { device_id }) => {

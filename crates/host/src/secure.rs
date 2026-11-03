@@ -467,6 +467,12 @@ pub fn accept_as_device(
     Ok(SecureLink { reader, writer, peer_key, peer_name, newly_paired: !known, socket })
 }
 
+/// Short public fingerprint the iPad advertises over Bonjour (`id` in the
+/// TXT record), so its Wi‑Fi service can be matched to a USB connection.
+pub fn device_id(public_key: &[u8; 32]) -> String {
+    hex(&public_key[..8])
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -612,6 +618,13 @@ mod tests {
         assert!(matches!(connect_as_host(a, &host, "PC", |_| false, |_| false), Err(SecureError::DeclinedHere)));
         // The iPad's verdict write may or may not land before the reset; either way no session.
         let _ = device.join().unwrap();
+    }
+
+    #[test]
+    fn device_id_matches_swift() {
+        // Same as `ServerTests.testDeviceIDMatchesRust`.
+        let key: [u8; 32] = std::array::from_fn(|i| i as u8 + 1);
+        assert_eq!(device_id(&key), "0102030405060708");
     }
 
     #[test]

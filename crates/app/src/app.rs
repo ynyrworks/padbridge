@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -18,7 +18,7 @@ use padbridge_host::{tr, GpuId};
 
 use crate::settings::{CodecSetting, Settings};
 use padbridge_host::pairing::HostSecurity;
-use padbridge_host::secure::{PairingRequest, SecureLink};
+use padbridge_host::secure::{device_id, PairingRequest, SecureLink};
 use padbridge_host::target::{open, resolve_target, Transport};
 use padbridge_host::{host_name, ping_session, Event};
 use padbridge_protocol::{Role, DISPLAY_PORT, MIRROR_PORT};
@@ -31,6 +31,9 @@ pub struct PadBridgeApp {
     _discovery: Discovery,
     discovery_events: Receiver<DiscoveryEvent>,
     endpoints: Vec<Endpoint>,
+    /// USB endpoint key → iPad fingerprint, learned from connections (USB
+    /// doesn't advertise it the way Bonjour does).
+    usb_devices: HashMap<String, String>,
     source_status: BTreeMap<&'static str, String>,
     manual_address: String,
     mirror: Option<MirrorView>,
@@ -105,6 +108,8 @@ struct DisplayShared {
     ended: Option<String>,
     /// The session ended because the connection went away: try again.
     lost: bool,
+    /// Identity key of the iPad reached, once connected.
+    peer_key: Option<[u8; 32]>,
     /// The virtual monitor was switched to the iPad's resolution; reconnect.
     restart: bool,
 }
@@ -120,12 +125,23 @@ struct Target {
     key: Option<String>,
     /// Reconnection attempts so far; 0 for a fresh start.
     attempt: u32,
+    /// The iPad's identity fingerprint once connected, to fail over to another
+    /// route to the same iPad (USB ⇄ Wi‑Fi).
+    device: Option<String>,
 }
 
 impl Target {
     fn manual(title: String, transport: Transport, port: u16) -> Self {
-        Self { title, transport, port, key: None, attempt: 0 }
+        Self { title, transport, port, key: None, attempt: 0, device: None }
     }
+}
+
+/// What a session's shared state says, for reconnection decisions.
+struct SessionState {
+    ended: bool,
+    lost: bool,
+    connected: bool,
+    peer_key: Option<[u8; 32]>,
 }
 
 struct DisplayView {
@@ -146,6 +162,8 @@ struct MirrorShared {
     ended: Option<String>,
     /// The session ended because the connection or broadcast went away: try again.
     lost: bool,
+    /// Identity key of the iPad reached, once connected.
+    peer_key: Option<[u8; 32]>,
     /// Clone of the socket so the UI can stop the session.
     shutdown: Option<TcpStream>,
     stop_requested: bool,
@@ -184,6 +202,7 @@ impl PadBridgeApp {
             _discovery: discovery,
             discovery_events,
             endpoints: Vec::new(),
+            usb_devices: HashMap::new(),
             source_status: BTreeMap::new(),
             manual_address: String::new(),
             mirror: None,
@@ -281,50 +300,88 @@ impl PadBridgeApp {
         self.reconnect_if_due();
     }
 
+    /// Where the target's iPad can be reached now, with the endpoint key: its
+    /// own endpoint while it exists, otherwise another route to the same iPad
+    /// (identified by fingerprint), USB first.
+    fn route(&self, target: &Target, display: bool) -> Option<(Transport, u16, String)> {
+        let default_port = if display { DISPLAY_PORT } else { MIRROR_PORT };
+        let via = |e: &Endpoint| (e.transport.clone(), e.port.unwrap_or(default_port), e.key.clone());
+        if let Some(e) = target.key.as_ref().and_then(|key| self.endpoints.iter().find(|e| &e.key == key)) {
+            return Some((e.transport.clone(), e.port.unwrap_or(target.port), e.key.clone()));
+        }
+        let device = target.device.as_ref()?;
+        let role = if display { Role::DisplaySink } else { Role::MirrorSource };
+        let usb = self.endpoints.iter().find(|e| self.usb_devices.get(&e.key) == Some(device));
+        let wifi = self.endpoints.iter().find(|e| e.device_id.as_ref() == Some(device) && e.role == Some(role));
+        usb.or(wifi).map(via)
+    }
+
     /// A session whose connection dropped keeps trying (USB unplugged, Wi‑Fi
     /// change, sleep, the iPad app backgrounded, the broadcast stopped) until
-    /// it reconnects or the user closes it.
+    /// it reconnects or the user closes it. If the same iPad is reachable
+    /// another way (USB unplugged but on Wi‑Fi), it switches right away, and
+    /// it moves back to USB when that is plugged in again.
     fn reconnect_if_due(&mut self) {
         let now = Instant::now();
-        let due = |retry_at: &mut Option<Instant>, target: &mut Target, ended: bool, lost: bool, connected: bool| {
-            if connected {
+        let mut starts = Vec::new();
+        for display in [true, false] {
+            let Some((target, retry_at, state)) = self.session_snapshot(display) else { continue };
+            let mut target = target;
+            if state.connected {
                 target.attempt = 0;
             }
-            match *retry_at {
-                None if ended && lost => {
-                    // 2 s, 4 s, … up to 10 s between attempts.
-                    *retry_at = Some(now + Duration::from_secs(u64::from(2 * (target.attempt + 1)).min(10)));
-                    false
+            if let Some(key) = state.peer_key {
+                let device = device_id(&key);
+                // Remember which iPad sits behind a USB endpoint, to recognise it later.
+                if let Some(usb_key) = target.key.as_ref().filter(|k| k.starts_with("usb:")) {
+                    self.usb_devices.insert(usb_key.clone(), device.clone());
                 }
-                Some(at) => at <= now,
-                None => false,
+                target.device = Some(device);
             }
-        };
-        let mut retry_display = None;
-        if let Some(view) = &mut self.display {
-            let s = view.shared.lock().unwrap();
-            let (ended, lost, connected) = (s.ended.is_some(), s.lost, s.peer_name.is_some());
-            drop(s);
-            if due(&mut view.retry_at, &mut view.target, ended, lost, connected) {
-                retry_display = Some(view.target.clone());
+            let mut route = self.route(&target, display);
+            let other_route = route.as_ref().is_some_and(|(_, _, key)| Some(key) != target.key.as_ref());
+            let mut retry_at = retry_at;
+            let mut start = false;
+            if state.ended && state.lost {
+                match retry_at {
+                    // Another way to the same iPad: take it now. Otherwise back off 2–10 s.
+                    None => {
+                        let delay = if other_route {
+                            Duration::from_millis(300)
+                        } else {
+                            Duration::from_secs(u64::from(2 * (target.attempt + 1)).min(10))
+                        };
+                        retry_at = Some(now + delay);
+                    }
+                    Some(at) => start = at <= now,
+                }
+            } else if !state.ended && state.connected && matches!(target.transport, Transport::Network(_)) {
+                // Back to USB once the same iPad is plugged in again.
+                let default_port = if display { DISPLAY_PORT } else { MIRROR_PORT };
+                let usb = target.device.as_ref().and_then(|device| {
+                    self.endpoints.iter().find(|e| self.usb_devices.get(&e.key) == Some(device))
+                });
+                if let Some(e) = usb {
+                    route = Some((e.transport.clone(), default_port, e.key.clone()));
+                    start = true;
+                    self.push_log(tr!("USB 已接上，改用 USB 連線", "USB is back, switching to USB"));
+                }
+            }
+            if let Some((transport, port, key)) = route.filter(|_| start) {
+                if Some(&key) != target.key.as_ref() && state.ended {
+                    self.push_log(tr!("改用 {} 連線", "Switching to {}", transport.label()));
+                }
+                target.transport = transport;
+                target.port = port;
+                target.key = Some(key);
+            }
+            self.store_session(display, target.clone(), retry_at);
+            if start {
+                target.attempt += 1;
+                starts.push((target, display));
             }
         }
-        let mut retry_mirror = None;
-        if let Some(view) = &mut self.mirror {
-            let s = view.shared.lock().unwrap();
-            let (ended, lost, connected) = (s.ended.is_some(), s.lost, s.peer_name.is_some());
-            drop(s);
-            if due(&mut view.retry_at, &mut view.target, ended, lost, connected) {
-                retry_mirror = Some(view.target.clone());
-            }
-        }
-        for (target, display) in [(retry_display, true), (retry_mirror, false)] {
-            let Some(mut target) = target else { continue };
-            target.attempt += 1;
-            // Prefer the device's current address (a re-plugged USB iPad has a new id).
-            if let Some(endpoint) = target.key.as_ref().and_then(|key| self.endpoints.iter().find(|e| &e.key == key)) {
-                target.transport = endpoint.transport.clone();
-            }
+        for (target, display) in starts {
             if display {
                 self.start_display(target);
             } else {
@@ -332,10 +389,33 @@ impl PadBridgeApp {
             }
         }
         if self.display.as_ref().is_some_and(|v| v.retry_at.is_some()) || self.mirror.as_ref().is_some_and(|v| v.retry_at.is_some()) {
-            self.ctx.request_repaint_after(Duration::from_millis(250));
+            self.ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 
+    fn session_snapshot(&self, display: bool) -> Option<(Target, Option<Instant>, SessionState)> {
+        if display {
+            let view = self.display.as_ref()?;
+            let s = view.shared.lock().unwrap();
+            let state = SessionState { ended: s.ended.is_some(), lost: s.lost, connected: s.peer_name.is_some(), peer_key: s.peer_key };
+            Some((view.target.clone(), view.retry_at, state))
+        } else {
+            let view = self.mirror.as_ref()?;
+            let s = view.shared.lock().unwrap();
+            let state = SessionState { ended: s.ended.is_some(), lost: s.lost, connected: s.peer_name.is_some(), peer_key: s.peer_key };
+            Some((view.target.clone(), view.retry_at, state))
+        }
+    }
+
+    fn store_session(&mut self, display: bool, target: Target, retry_at: Option<Instant>) {
+        if display {
+            if let Some(view) = &mut self.display {
+                (view.target, view.retry_at) = (target, retry_at);
+            }
+        } else if let Some(view) = &mut self.mirror {
+            (view.target, view.retry_at) = (target, retry_at);
+        }
+    }
     /// Restores the saved choices, where they still make sense on this machine.
     fn apply_settings(&mut self) {
         let s = self.settings.clone();
@@ -489,6 +569,7 @@ impl PadBridgeApp {
                     return;
                 }
                 s.shutdown = stream.shutdown_handle().ok();
+                s.peer_key = Some(stream.peer_key);
             }
             let frame_shared = worker_shared.clone();
             let frame_ctx = ctx.clone();
@@ -618,6 +699,7 @@ impl PadBridgeApp {
                         port: endpoint.port.unwrap_or(default),
                         key: Some(endpoint.key.clone()),
                         attempt: 0,
+                        device: endpoint.device_id.clone().or_else(|| self.usb_devices.get(&endpoint.key).cloned()),
                     };
                     if can_ping
                         && ui
@@ -979,6 +1061,7 @@ impl PadBridgeApp {
             if quiet {
                 let _ = log.send(tr!("已重新連線", "Reconnected"));
             }
+            worker_shared.lock().unwrap().peer_key = Some(stream.peer_key);
             run_display(stream, &host_name(), settings, &worker_stop, |event| {
                 let mut s = worker_shared.lock().unwrap();
                 match event {

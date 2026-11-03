@@ -52,7 +52,8 @@ public final class Server: @unchecked Sendable {
         if advertise {
             listener.service = NWListener.Service(
                 name: name, type: Wire.bonjourType, domain: nil,
-                txtRecord: Self.txtRecord(["proto": "\(Wire.protocolVersion)", "role": "\(role.rawValue)"]))
+                txtRecord: Self.txtRecord(["proto": "\(Wire.protocolVersion)", "role": "\(role.rawValue)",
+                                           "id": Self.deviceID(store.identity.publicKey)]))
         }
         listener.stateUpdateHandler = { [weak self, weak listener] state in
             switch state {
@@ -185,6 +186,11 @@ public final class Server: @unchecked Sendable {
             onEvent?(.message(peer, message))
         }
     }
+
+    /// Short public fingerprint of the identity key, advertised so a host can
+    /// tell that the Wi‑Fi service and a USB device are the same iPad (and
+    /// fail over between them). The key itself is still proven in the handshake.
+    public static func deviceID(_ publicKey: [UInt8]) -> String { hexString(Array(publicKey.prefix(8))) }
 
     /// DNS-SD TXT record: a sequence of length-prefixed `key=value` strings.
     static func txtRecord(_ entries: [String: String]) -> Data {
