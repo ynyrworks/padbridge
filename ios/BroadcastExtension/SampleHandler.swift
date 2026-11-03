@@ -1,12 +1,16 @@
 import ImageIO
 import PadBridgeMedia
+import PadBridgeNet
 import PadBridgeProtocol
 import ReplayKit
 import UIKit
 
 /// Mirror-mode broadcast upload extension. Listens on port 47801 while the
-/// broadcast runs; the Windows host connects to it directly. No App Group is
-/// used, so it works with free Apple ID provisioning.
+/// broadcast runs; the Windows host connects to it directly.
+///
+/// Computers paired in the app are let in when an App Group shares the
+/// pairings (not available with free Apple ID signing); otherwise a new
+/// computer is approved by restarting the broadcast (`BroadcastApproval`).
 ///
 /// Extensions are limited to roughly 50 MB of memory, so frames go straight
 /// into the hardware encoder and are capped at 1920 px on the long edge.
@@ -14,11 +18,21 @@ final class SampleHandler: RPBroadcastSampleHandler {
     private var streamer: MirrorStreamer?
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
+        // Starting again soon after an unknown computer asked counts as approving it.
+        let approval = BroadcastApproval()
+        approval.approvePending(into: PairingStore.shared)
         let streamer = MirrorStreamer(name: "\(UIDevice.current.name) Mirror")
         streamer.server.onEvent = { event in
             if case let .connected(peer) = event {
                 peer.send(.log(level: 1, text: "mirror source ready"))
             }
+        }
+        // No UI here: show the code by ending the broadcast; the computer keeps retrying.
+        streamer.server.onUnknownHost = { [weak self] request in
+            approval.recordPending(request)
+            let error = NSError(domain: "PadBridge", code: 1,
+                                userInfo: [NSLocalizedDescriptionKey: BroadcastApproval.message(for: request)])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.finishBroadcastWithError(error) }
         }
         do {
             try streamer.start()

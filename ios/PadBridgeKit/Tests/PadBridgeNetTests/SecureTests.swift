@@ -87,6 +87,40 @@ final class SecureTests: XCTestCase {
     }
 }
 
+final class BroadcastApprovalTests: XCTestCase {
+    private func fixtures() -> (BroadcastApproval, PairingStore, PairingRequest, URL) {
+        let suite = "padbridge-test-\(UUID())"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pairing-\(UUID()).json")
+        let request = PairingRequest(peerName: "PC", peerKey: [UInt8](repeating: 5, count: 32), code: "123456")
+        return (BroadcastApproval(defaults: UserDefaults(suiteName: suite)!), PairingStore(url: url, isShared: false), request, url)
+    }
+
+    func testRestartWithinWindowPairs() {
+        let (approval, store, request, url) = fixtures()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asked = Date()
+        approval.recordPending(request, at: asked)
+        XCTAssertEqual(approval.approvePending(into: store, at: asked.addingTimeInterval(20)), "PC")
+        XCTAssertTrue(store.isPaired(request.peerKey))
+        // Used up: a later restart doesn't pair anything else.
+        XCTAssertNil(approval.approvePending(into: store, at: asked.addingTimeInterval(25)))
+    }
+
+    func testRestartTooLateDoesNotPair() {
+        let (approval, store, request, url) = fixtures()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asked = Date()
+        approval.recordPending(request, at: asked)
+        XCTAssertNil(approval.approvePending(into: store, at: asked.addingTimeInterval(BroadcastApproval.window + 1)))
+        XCTAssertFalse(store.isPaired(request.peerKey))
+    }
+
+    func testMessageShowsCode() {
+        let (_, _, request, _) = fixtures()
+        XCTAssertTrue(BroadcastApproval.message(for: request).contains("123 456"))
+    }
+}
+
 extension DeviceIdentity {
     init(privateKey: Curve25519.KeyAgreement.PrivateKey) {
         try! self.init(rawRepresentation: privateKey.rawRepresentation)

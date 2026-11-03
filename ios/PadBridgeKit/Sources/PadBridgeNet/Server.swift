@@ -28,6 +28,10 @@ public final class Server: @unchecked Sendable {
     /// Asks the user whether to pair with an unknown host; `respond` may be
     /// called later from any thread. When nil, unknown hosts are refused.
     public var onPairingRequest: ((PeerConnection, PairingRequest, @escaping (Bool) -> Void) -> Void)?
+    /// Used instead when there is no UI to ask (the broadcast extension): told
+    /// about an unknown host, which is asked to retry after the user approved
+    /// some other way.
+    public var onUnknownHost: ((PairingRequest) -> Void)?
 
     private let requestedPort: UInt16
     private let advertise: Bool
@@ -142,6 +146,7 @@ public final class Server: @unchecked Sendable {
         let security = SecureConfig(identity: store.identity, name: name, role: .device(
             isPaired: { [store] in store.isPaired($0) },
             requestPairing: requestPairing,
+            deferPairing: onUnknownHost,
             onPaired: { [store] key, name in store.add(key: key, name: name) }))
         let peer = PeerConnection(connection: connection, queue: queue, security: security)
         holder.peer = peer

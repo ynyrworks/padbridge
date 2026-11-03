@@ -14,7 +14,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbSliceU8, YUVBuffer};
 use padbridge_host::mirror::annex_b_to_avcc;
-use padbridge_host::secure::{accept_as_device, Identity, SecureLink, SecureWriter};
+use padbridge_host::secure::{accept_as_device, Identity, SecureLink, SecureWriter, Verdict};
 use padbridge_protocol::{Codec, Message, Role, MIRROR_PORT, PROTOCOL_VERSION};
 
 const W: usize = 640;
@@ -52,7 +52,7 @@ fn main() {
 fn serve(stream: TcpStream, identity: &Identity) -> Result<(), Box<dyn std::error::Error>> {
     let link = accept_as_device(stream, identity, "Fake iPad Mirror", |_| false, |request| {
         println!("pairing with {} — code {}", request.peer_name, request.code);
-        Some(true)
+        Verdict::Accepted
     })?;
     let SecureLink { mut reader, writer: mut stream, .. } = link;
     thread::spawn(move || {

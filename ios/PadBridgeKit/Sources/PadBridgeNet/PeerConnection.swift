@@ -141,7 +141,7 @@ public final class PeerConnection: @unchecked Sendable {
             guard let key = peerKey, let keys else { throw SecureError.malformed("state") }
             let request = PairingRequest(peerName: name, peerKey: key, code: keys.code)
             switch config.role {
-            case let .device(isPaired, requestPairing, onPaired):
+            case let .device(isPaired, requestPairing, deferPairing, onPaired):
                 if isPaired(key) {
                     accept()
                 } else if let requestPairing {
@@ -158,6 +158,9 @@ public final class PeerConnection: @unchecked Sendable {
                             }
                         }
                     }
+                } else if let deferPairing {
+                    deferPairing(request)
+                    refuse(.pendingApproval)
                 } else {
                     refuse(.notPaired)
                 }

@@ -33,8 +33,11 @@ public enum SecureError: Error, Equatable {
 public enum Verdict: UInt8, Sendable {
     case accepted = 0
     case rejected = 1
-    /// This endpoint can't pair (the broadcast extension).
+    /// This endpoint can't pair.
     case notPaired = 2
+    /// The user is being asked another way (the broadcast extension ends the
+    /// broadcast showing the code; restarting it approves). Retry shortly.
+    case pendingApproval = 3
 }
 
 /// A host asking to pair, shown to the user.
@@ -191,9 +194,12 @@ struct RecordSplitter {
 /// Who we are in a handshake, and how we decide about the peer.
 public enum SecureRole {
     /// iPad side. `requestPairing` asks the user about an unknown host and
-    /// calls back with their answer; nil means this endpoint can't pair.
+    /// calls back with their answer. Without it, `deferPairing` (if set) is
+    /// told about the host and the host is asked to retry later; with
+    /// neither, unknown hosts are refused.
     case device(isPaired: ([UInt8]) -> Bool,
                 requestPairing: ((PairingRequest, @escaping (Bool) -> Void) -> Void)?,
+                deferPairing: ((PairingRequest) -> Void)?,
                 onPaired: ([UInt8], String) -> Void)
     /// Host side (tests): `confirm` decides about an iPad it doesn't know.
     case host(isKnown: ([UInt8]) -> Bool, confirm: (PairingRequest) -> Bool)

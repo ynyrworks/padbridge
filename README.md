@@ -48,8 +48,8 @@
 第一次從某台電腦連到某台 iPad 時，Windows 和 iPad 都會跳出配對確認，顯示同一組 6 位數字。數字相同才在兩邊按「配對」；不同代表可能有人冒充，請取消。配對之後就不再詢問，連線全程加密。
 
 - 已配對的裝置列在 Windows App 左側「已配對的 iPad」與 iPad App 的「已配對的電腦」，都可以取消配對。
-- 鏡像用的廣播擴充沒有畫面可以確認，所以**只接受已經在 PadBridge App 裡配對過的電腦**：請先用「延伸螢幕」或「⏱ 測試連線」配對一次。
-- 廣播擴充透過 App Group 讀取 App 的配對資料。若 iPad App 顯示「缺少 App Group」，表示簽章工具沒有保留 App Group，鏡像會拒絕所有電腦。
+- 鏡像用的廣播擴充沒有畫面可以按按鈕，所以電腦第一次要求鏡像時，**廣播會暫停並在 iPad 上顯示確認碼**；與電腦上的數字相同的話，在 60 秒內重新開始廣播就等於允許，Windows 會自動重試並連上。
+- 有 App Group 的安裝（付費開發者帳號）會直接沿用 App 裡的配對；用免費 Apple ID 透過 Sideloadly 安裝時沒有 App Group，所以鏡像要照上面方式另外確認一次。
 
 ### 延伸螢幕（Windows → iPad）
 
@@ -172,7 +172,7 @@ iOS 端由 GitHub Actions 的 `ios` job 以 XcodeGen 產生專案、跑 Swift �
 - iPad 端目前輸出 H.264 Constrained Baseline；HEVC 與 High profile 尚未支援。
 - 從原始碼編譯的 OpenH264 不在 Cisco 的 H.264 專利授權範圍內，詳見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 - iPad App 的介面目前只有中文。
-- 鏡像需要 iPad 安裝時保留 App Group（見「第一次連線：配對」）。
+- 用免費 Apple ID 安裝時，鏡像的配對要另外確認一次（見「第一次連線：配對」）。
 
 ## Code signing policy
 

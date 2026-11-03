@@ -92,6 +92,10 @@ pub enum Verdict {
     Rejected = 1,
     /// This port can't pair (the broadcast extension); pair in the app first.
     NotPaired = 2,
+    /// The iPad asked its user to approve (the broadcast extension, which
+    /// has no UI, ends the broadcast with the code; restarting it approves).
+    /// Try again shortly.
+    PendingApproval = 3,
 }
 
 #[derive(Debug)]
@@ -108,6 +112,9 @@ pub enum SecureError {
     DeclinedHere,
     /// The iPad refused.
     Refused(Verdict),
+    /// We confirmed this new iPad; it is waiting for its own user's approval.
+    /// The caller should remember the key and retry.
+    AwaitingApproval { peer_key: [u8; 32], peer_name: String },
 }
 
 impl fmt::Display for SecureError {
@@ -129,6 +136,10 @@ impl fmt::Display for SecureError {
                     "This computer is not paired with the iPad yet: open the PadBridge app on the iPad, then pair by choosing Extend or Test connection on Windows"
                 ))
             }
+            SecureError::Refused(Verdict::PendingApproval) | SecureError::AwaitingApproval { .. } => f.write_str(&tr!(
+                "請在 iPad 上確認：廣播已暫停並顯示確認碼，數字相同就在 60 秒內重新開始廣播",
+                "Confirm on the iPad: the broadcast stopped and shows the code; if it matches, start the broadcast again within 60 seconds"
+            )),
             SecureError::Refused(Verdict::Accepted) => write!(f, "unexpected"),
         }
     }
@@ -430,20 +441,22 @@ pub fn connect_as_host(
         [VERDICT, 0] => {}
         [VERDICT, 1] => return Err(SecureError::Refused(Verdict::Rejected)),
         [VERDICT, 2] => return Err(SecureError::Refused(Verdict::NotPaired)),
+        [VERDICT, 3] if !known => return Err(SecureError::AwaitingApproval { peer_key, peer_name }),
+        [VERDICT, 3] => return Err(SecureError::Refused(Verdict::PendingApproval)),
         _ => return Err(SecureError::Malformed("verdict")),
     }
     Ok(SecureLink { reader, writer, peer_key, peer_name, newly_paired: !known, socket })
 }
 
 /// iPad side (used by tests and the fake iPads). `approve` decides about an
-/// unpaired host: `Some(true/false)` from the user, `None` if this endpoint
-/// can't pair.
+/// unpaired host: `Accepted` / `Rejected` from the user, `NotPaired` if this
+/// endpoint can't pair, `PendingApproval` to have the host retry later.
 pub fn accept_as_device(
     stream: TcpStream,
     me: &Identity,
     my_name: &str,
     is_paired: impl FnOnce(&[u8; 32]) -> bool,
-    approve: impl FnOnce(&PairingRequest) -> Option<bool>,
+    approve: impl FnOnce(&PairingRequest) -> Verdict,
 ) -> Result<SecureLink, SecureError> {
     let Handshake { keys, peer_key, mut reader, mut writer, socket } = handshake(stream, me, false)?;
     writer.write_record(&intro_record(my_name))?;
@@ -453,11 +466,7 @@ pub fn accept_as_device(
         Verdict::Accepted
     } else {
         let request = PairingRequest { peer_name: peer_name.clone(), peer_key, code: keys.code() };
-        match approve(&request) {
-            Some(true) => Verdict::Accepted,
-            Some(false) => Verdict::Rejected,
-            None => Verdict::NotPaired,
-        }
+        approve(&request)
     };
     writer.write_record(&[VERDICT, verdict as u8])?;
     if verdict != Verdict::Accepted {
@@ -543,7 +552,7 @@ mod tests {
             let ipad = ipad.clone();
             thread::spawn(move || {
                 let mut link =
-                    accept_as_device(b, &ipad, "iPad", |_| false, |request| Some(request.peer_name == "PC")).unwrap();
+                    accept_as_device(b, &ipad, "iPad", |_| false, |request| if request.peer_name == "PC" { Verdict::Accepted } else { Verdict::Rejected }).unwrap();
                 let mut buf = [0u8; 5];
                 link.reader.read_exact(&mut buf).unwrap();
                 link.writer.write_all(&buf).unwrap();
@@ -580,7 +589,7 @@ mod tests {
         let (a, b) = pair();
         let device = thread::spawn(move || {
             let ipad = Identity::generate().unwrap();
-            accept_as_device(b, &ipad, "iPad Mirror", |_| false, |_| None).err()
+            accept_as_device(b, &ipad, "iPad Mirror", |_| false, |_| Verdict::NotPaired).err()
         });
         let host = Identity::generate().unwrap();
         let error = connect_as_host(a, &host, "PC", |_| false, |_| true).err().unwrap();
@@ -589,11 +598,37 @@ mod tests {
     }
 
     #[test]
+    fn pending_approval_then_retry_gets_in() {
+        let ipad = Identity::generate().unwrap();
+        let host = Identity::generate().unwrap();
+        let host_key = host.public_key();
+
+        // First try: the iPad (broadcast extension) asks its user and defers.
+        let (a, b) = pair();
+        let first = {
+            let ipad = ipad.clone();
+            thread::spawn(move || accept_as_device(b, &ipad, "iPad Mirror", |_| false, |_| Verdict::PendingApproval).err())
+        };
+        let error = connect_as_host(a, &host, "PC", |_| false, |_| true).err().unwrap();
+        assert!(matches!(error, SecureError::AwaitingApproval { .. }), "{error}");
+        assert!(matches!(first.join().unwrap(), Some(SecureError::Refused(Verdict::PendingApproval))));
+
+        // After the user restarted the broadcast, the extension knows the host.
+        let (a, b) = pair();
+        let second = thread::spawn(move || {
+            accept_as_device(b, &ipad, "iPad Mirror", |key| *key == host_key, |_| panic!("asked again")).map(|_| ())
+        });
+        // The host remembered the iPad after its own confirmation, so no prompt either.
+        connect_as_host(a, &host, "PC", |_| true, |_| panic!("asked again")).unwrap();
+        second.join().unwrap().unwrap();
+    }
+
+    #[test]
     fn tampered_record_is_rejected() {
         let (a, b) = pair();
         let ipad = Identity::generate().unwrap();
         let device = thread::spawn(move || {
-            let mut link = accept_as_device(b, &ipad, "iPad", |_| false, |_| Some(true)).unwrap();
+            let mut link = accept_as_device(b, &ipad, "iPad", |_| false, |_| Verdict::Accepted).unwrap();
             let mut buf = [0u8; 4];
             link.reader.read_exact(&mut buf).map(|()| buf)
         });
@@ -612,7 +647,7 @@ mod tests {
         let (a, b) = pair();
         let device = thread::spawn(move || {
             let ipad = Identity::generate().unwrap();
-            accept_as_device(b, &ipad, "iPad", |_| false, |_| Some(true)).map(|_| ())
+            accept_as_device(b, &ipad, "iPad", |_| false, |_| Verdict::Accepted).map(|_| ())
         });
         let host = Identity::generate().unwrap();
         assert!(matches!(connect_as_host(a, &host, "PC", |_| false, |_| false), Err(SecureError::DeclinedHere)));

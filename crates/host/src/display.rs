@@ -729,7 +729,7 @@ mod tests {
 
     fn mirror_session(choice: crate::mirror::DecoderChoice) -> Vec<crate::mirror::MirrorEvent> {
         use crate::mirror::{run_mirror, MirrorEvent};
-        use crate::secure::{accept_as_device, connect_as_host, Identity};
+        use crate::secure::{accept_as_device, connect_as_host, Identity, Verdict};
         use padbridge_protocol::{Role, PROTOCOL_VERSION};
         use std::io::Write;
         use std::net::{TcpListener, TcpStream};
@@ -742,7 +742,7 @@ mod tests {
         let ipad = thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
             let identity = Identity::generate().unwrap();
-            let mut link = accept_as_device(socket, &identity, "test iPad", |_| false, |_| Some(true)).unwrap();
+            let mut link = accept_as_device(socket, &identity, "test iPad", |_| false, |_| Verdict::Accepted).unwrap();
             let settings = DisplaySettings { max_width: 320, ..DisplaySettings::default() };
             let mut pipeline = VideoPipeline::new(settings).unwrap();
             let hello = Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: "test iPad".into() };

@@ -54,8 +54,7 @@ struct ContentView: View {
                         Text("已配對的電腦")
                     } footer: {
                         if !display.pairingShared {
-                            Text("這個安裝缺少 App Group，廣播擴充讀不到配對資料，所以鏡像會拒絕所有電腦。請用支援 App Group 的方式重新簽章安裝。")
-                                .foregroundStyle(.red)
+                            Text("這個安裝沒有 App Group（免費 Apple ID 的限制），鏡像需要另外確認一次：電腦第一次要求鏡像時，廣播會暫停並顯示確認碼，數字相同就在 60 秒內重新開始廣播。")
                         }
                     }
                     Section("事件") {

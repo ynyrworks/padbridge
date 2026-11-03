@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use padbridge_host::ping_session;
-use padbridge_host::secure::{accept_as_device, connect_as_host, Identity, SecureLink};
+use padbridge_host::secure::{accept_as_device, connect_as_host, Identity, SecureLink, Verdict};
 use padbridge_protocol::{FrameDecoder, Message, Role, PROTOCOL_VERSION};
 
 fn fake_ipad(mut link: SecureLink) {
@@ -38,7 +38,7 @@ fn handshake_and_pings() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let ipad = Identity::generate().unwrap();
-        let link = accept_as_device(listener.accept().unwrap().0, &ipad, "Fake iPad", |_| false, |_| Some(true)).unwrap();
+        let link = accept_as_device(listener.accept().unwrap().0, &ipad, "Fake iPad", |_| false, |_| Verdict::Accepted).unwrap();
         fake_ipad(link);
     });
 

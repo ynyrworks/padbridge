@@ -91,6 +91,27 @@ final class ServerTests: XCTestCase {
         server.stop()
     }
 
+    func testUnknownHostIsDeferredWhenThereIsNoUI() throws {
+        let server = Server(role: .mirrorSource, name: "Mirror", port: 0, advertise: false, store: temporaryStore())
+        let told = expectation(description: "extension told about the host")
+        server.onUnknownHost = { request in
+            XCTAssertEqual(request.peerName, "Test PC")
+            told.fulfill()
+        }
+        let port = try startServer(server)
+        let closed = expectation(description: "client closed")
+        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"),
+                                    security: hostConfig())
+        client.onReady = { XCTFail("must wait for approval") }
+        client.onClose = { error in
+            XCTAssertEqual(error as? SecureError, .refused(.pendingApproval))
+            closed.fulfill()
+        }
+        client.start()
+        wait(for: [told, closed], timeout: 5)
+        server.stop()
+    }
+
     func testDeviceIDMatchesRust() {
         // Same as `secure::device_id` in crates/host/src/secure.rs.
         XCTAssertEqual(Server.deviceID(Array(1...32)), "0102030405060708")

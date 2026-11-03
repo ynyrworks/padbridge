@@ -10,7 +10,7 @@ use std::net::TcpListener;
 use std::time::Instant;
 
 use padbridge_host::mirror::{Frame, MirrorDecoder};
-use padbridge_host::secure::{accept_as_device, Identity, SecureLink, SecureWriter};
+use padbridge_host::secure::{accept_as_device, Identity, SecureLink, SecureWriter, Verdict};
 use padbridge_protocol::{Codec, FrameDecoder, Message, Phase, PointerKind, Role, DISPLAY_PORT, PROTOCOL_VERSION};
 
 fn main() {
@@ -28,7 +28,7 @@ fn main() {
         let stream = stream.expect("accept");
         let link = accept_as_device(stream, &identity, "Fake iPad", |_| false, |request| {
             println!("pairing with {} — code {}", request.peer_name, request.code);
-            Some(true)
+            Verdict::Accepted
         });
         let SecureLink { reader: mut stream, mut writer, .. } = match link {
             Ok(link) => link,

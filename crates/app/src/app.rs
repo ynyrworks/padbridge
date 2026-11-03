@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,9 +31,10 @@ pub struct PadBridgeApp {
     _discovery: Discovery,
     discovery_events: Receiver<DiscoveryEvent>,
     endpoints: Vec<Endpoint>,
-    /// USB endpoint key → iPad fingerprint, learned from connections (USB
-    /// doesn't advertise it the way Bonjour does).
-    usb_devices: HashMap<String, String>,
+    /// USB endpoint key → iPad fingerprints, learned from connections (USB
+    /// doesn't advertise it the way Bonjour does). Several, because the app
+    /// and the broadcast extension may have different identities.
+    usb_devices: HashMap<String, HashSet<String>>,
     source_status: BTreeMap<&'static str, String>,
     manual_address: String,
     mirror: Option<MirrorView>,
@@ -311,7 +312,7 @@ impl PadBridgeApp {
         }
         let device = target.device.as_ref()?;
         let role = if display { Role::DisplaySink } else { Role::MirrorSource };
-        let usb = self.endpoints.iter().find(|e| self.usb_devices.get(&e.key) == Some(device));
+        let usb = self.endpoints.iter().find(|e| self.usb_devices.get(&e.key).is_some_and(|ids| ids.contains(device)));
         let wifi = self.endpoints.iter().find(|e| e.device_id.as_ref() == Some(device) && e.role == Some(role));
         usb.or(wifi).map(via)
     }
@@ -334,7 +335,7 @@ impl PadBridgeApp {
                 let device = device_id(&key);
                 // Remember which iPad sits behind a USB endpoint, to recognise it later.
                 if let Some(usb_key) = target.key.as_ref().filter(|k| k.starts_with("usb:")) {
-                    self.usb_devices.insert(usb_key.clone(), device.clone());
+                    self.usb_devices.entry(usb_key.clone()).or_default().insert(device.clone());
                 }
                 target.device = Some(device);
             }
@@ -359,7 +360,7 @@ impl PadBridgeApp {
                 // Back to USB once the same iPad is plugged in again.
                 let default_port = if display { DISPLAY_PORT } else { MIRROR_PORT };
                 let usb = target.device.as_ref().and_then(|device| {
-                    self.endpoints.iter().find(|e| self.usb_devices.get(&e.key) == Some(device))
+                    self.endpoints.iter().find(|e| self.usb_devices.get(&e.key).is_some_and(|ids| ids.contains(device)))
                 });
                 if let Some(e) = usb {
                     route = Some((e.transport.clone(), default_port, e.key.clone()));
@@ -699,7 +700,7 @@ impl PadBridgeApp {
                         port: endpoint.port.unwrap_or(default),
                         key: Some(endpoint.key.clone()),
                         attempt: 0,
-                        device: endpoint.device_id.clone().or_else(|| self.usb_devices.get(&endpoint.key).cloned()),
+                        device: endpoint.device_id.clone(),
                     };
                     if can_ping
                         && ui
@@ -1266,11 +1267,13 @@ impl eframe::App for PadBridgeApp {
 /// Whether a failed connection is worth retrying: not when someone declined
 /// pairing or the other side runs an incompatible version.
 fn is_retryable(error: &padbridge_host::BoxError) -> bool {
-    use padbridge_host::secure::SecureError;
-    !matches!(
-        error.downcast_ref::<SecureError>(),
-        Some(SecureError::Refused(_) | SecureError::DeclinedHere | SecureError::BadMagic)
-    )
+    use padbridge_host::secure::{SecureError, Verdict};
+    match error.downcast_ref::<SecureError>() {
+        // Waiting for the iPad's user to approve: keep trying until they do.
+        Some(SecureError::Refused(Verdict::PendingApproval) | SecureError::AwaitingApproval { .. }) => true,
+        Some(SecureError::Refused(_) | SecureError::DeclinedHere | SecureError::BadMagic) => false,
+        _ => true,
+    }
 }
 
 fn apply_language(settings: &Settings) {

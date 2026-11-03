@@ -113,11 +113,21 @@ impl HostSecurity {
         my_name: &str,
         confirm: impl FnOnce(&PairingRequest) -> bool,
     ) -> Result<SecureLink, SecureError> {
-        let link = connect_as_host(stream, &self.identity, my_name, |key| self.is_paired(key), confirm)?;
-        if link.newly_paired {
-            self.remember(&link.peer_key, &link.peer_name)?;
+        match connect_as_host(stream, &self.identity, my_name, |key| self.is_paired(key), confirm) {
+            Ok(link) => {
+                if link.newly_paired {
+                    self.remember(&link.peer_key, &link.peer_name)?;
+                }
+                Ok(link)
+            }
+            // Our user approved; remember it so the retry after the iPad's
+            // approval doesn't ask again.
+            Err(SecureError::AwaitingApproval { peer_key, peer_name }) => {
+                self.remember(&peer_key, &peer_name)?;
+                Err(SecureError::AwaitingApproval { peer_key, peer_name })
+            }
+            Err(e) => Err(e),
         }
-        Ok(link)
     }
 }
 
@@ -167,7 +177,7 @@ fn unprotect(data: &[u8]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secure::accept_as_device;
+    use crate::secure::{accept_as_device, Verdict};
     use std::net::TcpListener;
     use std::thread;
 
@@ -191,7 +201,7 @@ mod tests {
         let server = listener.accept().unwrap().0;
         let device = thread::spawn(move || {
             let ipad = Identity::generate().unwrap();
-            accept_as_device(server, &ipad, "Test iPad", |_| false, |_| Some(true)).map(|l| l.peer_key)
+            accept_as_device(server, &ipad, "Test iPad", |_| false, |_| Verdict::Accepted).map(|l| l.peer_key)
         });
         let link = security.connect(client, "PC", |_| true).unwrap();
         assert_eq!(device.join().unwrap().unwrap(), key);
