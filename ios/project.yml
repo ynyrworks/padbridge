@@ -30,6 +30,12 @@ targets:
       - package: PadBridgeKit
         product: PadBridgeMedia
       - target: PadBridgeBroadcast
+    # Shares the pairing store with the broadcast extension.
+    entitlements:
+      path: Generated/App.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.io.github.padbridge
     info:
       path: Generated/App-Info.plist
       properties:
@@ -64,6 +70,11 @@ targets:
         product: PadBridgeMedia
       - sdk: ReplayKit.framework
       - sdk: VideoToolbox.framework
+    entitlements:
+      path: Generated/Broadcast.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.io.github.padbridge
     info:
       path: Generated/Broadcast-Info.plist
       properties:

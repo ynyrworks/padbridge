@@ -13,9 +13,11 @@ public final class MirrorStreamer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "padbridge.mirror")
     private var lastFrame: (buffer: CVPixelBuffer, rotation: UInt8)?
 
+    /// The extension has no UI, so it can't pair: only hosts already paired
+    /// in the app (shared through `store`) may connect.
     public init(name: String, port: UInt16 = Wire.mirrorPort, advertise: Bool = true,
-                settings: VideoEncoder.Settings = VideoEncoder.Settings()) {
-        server = Server(role: .mirrorSource, name: name, port: port, advertise: advertise)
+                settings: VideoEncoder.Settings = VideoEncoder.Settings(), store: PairingStore = .shared) {
+        server = Server(role: .mirrorSource, name: name, port: port, advertise: advertise, store: store)
         encoder = VideoEncoder(settings: settings)
 
         encoder.onFrame = { [server, settings] frame in

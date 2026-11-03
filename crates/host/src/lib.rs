@@ -12,6 +12,8 @@ pub mod hwdec;
 pub mod hwenc;
 pub mod input;
 pub mod mirror;
+pub mod pairing;
+pub mod secure;
 pub mod session;
 pub mod target;
 #[cfg(windows)]

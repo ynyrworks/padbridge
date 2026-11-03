@@ -5,6 +5,10 @@ import PadBridgeProtocol
 /// TCP listener on the iPad side. The Windows host always connects to us, over
 /// Wi‑Fi (found via Bonjour) or through the usbmux tunnel to the same port.
 ///
+/// Every connection is encrypted and authenticated first (`PeerConnection`):
+/// hosts in `store` are let in; a new host is only accepted if
+/// `onPairingRequest` is set and the user approves it.
+///
 /// The server answers `Hello`, `Ping` and `Bye` itself and forwards every other
 /// message through `onEvent`, which runs on the server's private queue.
 public final class Server: @unchecked Sendable {
@@ -19,7 +23,11 @@ public final class Server: @unchecked Sendable {
 
     public let role: Role
     public let name: String
+    public let store: PairingStore
     public var onEvent: ((Event) -> Void)?
+    /// Asks the user whether to pair with an unknown host; `respond` may be
+    /// called later from any thread. When nil, unknown hosts are refused.
+    public var onPairingRequest: ((PeerConnection, PairingRequest, @escaping (Bool) -> Void) -> Void)?
 
     private let requestedPort: UInt16
     private let advertise: Bool
@@ -28,9 +36,10 @@ public final class Server: @unchecked Sendable {
     private var peers: [PeerConnection] = []
 
     /// `port` 0 picks any free port. `advertise` publishes a Bonjour service.
-    public init(role: Role, name: String, port: UInt16, advertise: Bool = true) {
+    public init(role: Role, name: String, port: UInt16, advertise: Bool = true, store: PairingStore = .shared) {
         self.role = role
         self.name = name
+        self.store = store
         requestedPort = port
         self.advertise = advertise
     }
@@ -119,8 +128,22 @@ public final class Server: @unchecked Sendable {
         requestKeyframe()
     }
 
+    private final class WeakPeer { weak var peer: PeerConnection? }
+
     private func accept(_ connection: NWConnection) {
-        let peer = PeerConnection(connection: connection, queue: queue)
+        let holder = WeakPeer()
+        let requestPairing = onPairingRequest.map { handler in
+            { (request: PairingRequest, respond: @escaping (Bool) -> Void) in
+                guard let peer = holder.peer else { return respond(false) }
+                handler(peer, request, respond)
+            }
+        }
+        let security = SecureConfig(identity: store.identity, name: name, role: .device(
+            isPaired: { [store] in store.isPaired($0) },
+            requestPairing: requestPairing,
+            onPaired: { [store] key, name in store.add(key: key, name: name) }))
+        let peer = PeerConnection(connection: connection, queue: queue, security: security)
+        holder.peer = peer
         peers.append(peer)
         peer.onReady = { [weak self, weak peer] in
             guard let self, let peer else { return }

@@ -61,6 +61,11 @@ jobs:
           mkdir Payload
           cp -R PadBridge.xcarchive/Products/Applications/PadBridge.app Payload/
           test -d Payload/PadBridge.app/PlugIns/PadBridgeBroadcast.appex
+          # Unsigned builds carry no entitlements; ad-hoc sign with them so
+          # re-signing tools (Sideloadly) know to keep the App Group.
+          codesign -f -s - --entitlements ../Generated/Broadcast.entitlements Payload/PadBridge.app/PlugIns/PadBridgeBroadcast.appex
+          codesign -f -s - --entitlements ../Generated/App.entitlements Payload/PadBridge.app
+          codesign -d --entitlements - Payload/PadBridge.app/PlugIns/PadBridgeBroadcast.appex
           zip -qry PadBridge-unsigned.ipa Payload
 
       - uses: actions/upload-artifact@v5

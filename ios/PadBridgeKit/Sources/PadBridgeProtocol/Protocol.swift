@@ -7,7 +7,7 @@
 import Foundation
 
 public enum Wire {
-    public static let protocolVersion: UInt16 = 1
+    public static let protocolVersion: UInt16 = 2
     public static let magic: [UInt8] = Array("PDBR".utf8)
     public static let maxFrameLength = 16 * 1024 * 1024
     public static let displayPort: UInt16 = 47800

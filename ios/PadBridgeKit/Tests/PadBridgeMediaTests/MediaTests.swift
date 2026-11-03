@@ -199,7 +199,12 @@ final class MediaTests: XCTestCase {
     /// A host connecting to a static screen still gets a keyframe: the
     /// streamer re-encodes the last captured frame.
     func testStreamerSendsKeyframeToNewHost() throws {
-        let streamer = MirrorStreamer(name: "Test Mirror", port: 0, advertise: false)
+        // The extension only admits hosts already paired in the app.
+        let store = PairingStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("pairing-\(UUID()).json"),
+                                 isShared: true)
+        let host = DeviceIdentity()
+        store.add(key: host.publicKey, name: "Test PC")
+        let streamer = MirrorStreamer(name: "Test Mirror", port: 0, advertise: false, store: store)
         let ready = expectation(description: "listener ready")
         var port: UInt16 = 0
         streamer.server.onEvent = { event in
@@ -216,7 +221,9 @@ final class MediaTests: XCTestCase {
         let gotParams = expectation(description: "codec params")
         let gotKeyframe = expectation(description: "keyframe")
         for e in [gotConfig, gotParams, gotKeyframe] { e.assertForOverFulfill = false }
-        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"))
+        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"),
+                                    security: SecureConfig(identity: host, name: "Test PC",
+                                                           role: .host(isKnown: { _ in true }, confirm: { _ in false })))
         client.onReady = { client.send(.hello(version: Wire.protocolVersion, role: .host, name: "Test PC")) }
         client.onMessage = { message in
             switch message {

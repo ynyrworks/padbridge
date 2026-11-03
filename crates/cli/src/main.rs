@@ -11,7 +11,9 @@ use padbridge_host::capture::list_monitors;
 use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings};
 use padbridge_host::gpu::list_gpus;
 use padbridge_host::mirror::{run_mirror, DecoderChoice, Frame, MirrorEvent};
-use padbridge_host::target::{connect, describe_device, resolve_target};
+use padbridge_host::pairing::HostSecurity;
+use padbridge_host::secure::SecureLink;
+use padbridge_host::target::{describe_device, resolve_target};
 use padbridge_host::{host_name, ping_session, BoxError, Event};
 use padbridge_protocol::{DISPLAY_PORT, MIRROR_PORT};
 use padbridge_usbmux::{DeviceEvent, Usbmux};
@@ -24,6 +26,8 @@ const USAGE: &str = "\
   padbridge-cli mirror <目標>               在視窗中顯示 iPad 畫面（預設埠 47801）
   padbridge-cli monitors                    列出可傳送到 iPad 的螢幕
   padbridge-cli gpus                        列出可用來編碼 / 解碼的 GPU
+  padbridge-cli paired                      列出已配對的 iPad
+  padbridge-cli unpair <金鑰開頭|名稱>       取消與某台 iPad 的配對
   padbridge-cli display <目標> [螢幕編號]   把 Windows 螢幕顯示在 iPad 上（預設埠 47800）
 
 <目標>：
@@ -49,6 +53,8 @@ fn main() -> ExitCode {
         ["mirror", target] => mirror(target),
         ["monitors"] => monitors(),
         ["gpus"] => gpus(),
+        ["paired"] => paired(),
+        ["unpair", who] => unpair(who),
         ["display", target] => display(target, 0),
         ["display", target, monitor] => match monitor.parse() {
             Ok(n) => display(target, n),
@@ -94,11 +100,44 @@ fn watch() -> CliResult {
     Ok(ExitCode::SUCCESS)
 }
 
-fn open(target: &str, default_port: u16) -> Result<std::net::TcpStream, BoxError> {
+fn open(target: &str, default_port: u16) -> Result<SecureLink, BoxError> {
     let (transport, port, description) = resolve_target(target, default_port)?;
-    let stream = connect(&transport, port)?;
-    println!("已連線 {description}");
-    Ok(stream)
+    let security = HostSecurity::load()?;
+    let link = padbridge_host::target::open(&transport, port, &security, |request| {
+        println!("要與「{}」配對嗎？請確認 iPad 上顯示的數字相同：", request.peer_name);
+        println!("\n    {} {}\n", &request.code[..3], &request.code[3..]);
+        print!("相同請輸入 y 並在 iPad 上按「配對」：");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y")
+    })?;
+    if link.newly_paired {
+        println!("已與「{}」配對", link.peer_name);
+    }
+    println!("已連線 {description}（加密）");
+    Ok(link)
+}
+
+fn paired() -> CliResult {
+    let devices = HostSecurity::load()?.devices();
+    if devices.is_empty() {
+        println!("尚未與任何 iPad 配對。第一次連線時會要求確認配對碼。");
+    }
+    for d in devices {
+        println!("{}  {}", &d.key[..16], d.name);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn unpair(prefix: &str) -> CliResult {
+    let security = HostSecurity::load()?;
+    let matches: Vec<_> = security.devices().into_iter().filter(|d| d.key.starts_with(prefix) || d.name == prefix).collect();
+    let [device] = matches.as_slice() else {
+        return Err(format!("找到 {} 台符合「{prefix}」的 iPad；請用 `padbridge-cli paired` 列出的金鑰開頭指定", matches.len()).into());
+    };
+    security.forget(&device.key)?;
+    println!("已取消與「{}」的配對", device.name);
+    Ok(ExitCode::SUCCESS)
 }
 
 fn ping(target: &str, count: u32) -> CliResult {
@@ -183,7 +222,7 @@ fn display(target: &str, monitor: usize) -> CliResult {
 
 fn mirror(target: &str) -> CliResult {
     let stream = open(target, MIRROR_PORT)?;
-    let shutdown = stream.try_clone()?;
+    let shutdown = stream.shutdown_handle()?;
 
     // Small buffer: if the window falls behind, frames are dropped rather than queued.
     let (tx, rx) = mpsc::sync_channel::<Frame>(2);

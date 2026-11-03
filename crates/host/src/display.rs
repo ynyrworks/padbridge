@@ -232,7 +232,6 @@ pub use session::{run_display, DisplayEvent};
 #[cfg(windows)]
 mod session {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -251,6 +250,7 @@ mod session {
     use crate::capture::{list_monitors, Capturer};
     use crate::gpu::{open_video_device, Gpu};
     use crate::hwenc::HardwareEncoder;
+    use crate::secure::{SecureLink, SecureReader, SecureWriter};
     use crate::GpuId;
     use crate::input::{Injector, InputMapper, ScreenRect};
 
@@ -329,13 +329,13 @@ mod session {
     /// Streams a monitor to the iPad until it disconnects, an error occurs,
     /// or `stop` is set. Runs on the calling thread.
     pub fn run_display(
-        stream: TcpStream,
+        link: SecureLink,
         host_name: &str,
         settings: DisplaySettings,
         stop: &AtomicBool,
         mut on_event: impl FnMut(DisplayEvent),
     ) {
-        let reason = match stream_display(stream, host_name, settings, stop, &mut on_event) {
+        let reason = match stream_display(link, host_name, settings, stop, &mut on_event) {
             Ok(reason) => reason,
             Err(e) => format!("錯誤：{e}"),
         };
@@ -389,14 +389,14 @@ mod session {
     }
 
     fn stream_display(
-        stream: TcpStream,
+        link: SecureLink,
         host_name: &str,
         settings: DisplaySettings,
         stop: &AtomicBool,
         on_event: &mut impl FnMut(DisplayEvent),
     ) -> Result<String, crate::BoxError> {
-        let mut writer = stream.try_clone()?;
-        let send = |writer: &mut TcpStream, message: &Message| -> Result<usize, crate::BoxError> {
+        let SecureLink { reader, mut writer, .. } = link;
+        let send = |writer: &mut SecureWriter, message: &Message| -> Result<usize, crate::BoxError> {
             let frame = message.to_frame()?;
             writer.write_all(&frame)?;
             Ok(frame.len())
@@ -413,7 +413,7 @@ mod session {
         let want_keyframe = Arc::new(AtomicBool::new(true));
         let (events_tx, events_rx) = mpsc::channel();
         let reader_keyframe = want_keyframe.clone();
-        thread::spawn(move || read_peer(stream, reader_keyframe, input_rect, events_tx));
+        thread::spawn(move || read_peer(reader, reader_keyframe, input_rect, events_tx));
 
         let interval = Duration::from_secs_f64(1.0 / f64::from(settings.max_fps.max(1)));
         let mut announced = None;
@@ -516,7 +516,7 @@ mod session {
     /// Reads the iPad's messages and injects its input when `input_rect` is
     /// set. Sends `None` when the connection ends.
     fn read_peer(
-        mut stream: TcpStream,
+        mut stream: SecureReader,
         want_keyframe: Arc<AtomicBool>,
         input_rect: Option<ScreenRect>,
         events: mpsc::Sender<Option<DisplayEvent>>,
@@ -724,6 +724,7 @@ mod tests {
 
     fn mirror_session(choice: crate::mirror::DecoderChoice) -> Vec<crate::mirror::MirrorEvent> {
         use crate::mirror::{run_mirror, MirrorEvent};
+        use crate::secure::{accept_as_device, connect_as_host, Identity};
         use padbridge_protocol::{Role, PROTOCOL_VERSION};
         use std::io::Write;
         use std::net::{TcpListener, TcpStream};
@@ -734,24 +735,27 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let ipad = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
+            let (socket, _) = listener.accept().unwrap();
+            let identity = Identity::generate().unwrap();
+            let mut link = accept_as_device(socket, &identity, "test iPad", |_| false, |_| Some(true)).unwrap();
             let settings = DisplaySettings { max_width: 320, ..DisplaySettings::default() };
             let mut pipeline = VideoPipeline::new(settings).unwrap();
             let hello = Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: "test iPad".into() };
-            socket.write_all(&hello.to_frame().unwrap()).unwrap();
+            link.writer.write_all(&hello.to_frame().unwrap()).unwrap();
             for i in 0..10 {
                 for m in pipeline.encode(&ScreenImage { width: 320, height: 200, bgra: &gradient(320, 200, i) }).unwrap() {
-                    socket.write_all(&m.to_frame().unwrap()).unwrap();
+                    link.writer.write_all(&m.to_frame().unwrap()).unwrap();
                 }
                 thread::sleep(Duration::from_millis(5));
             }
-            socket.write_all(&Message::Bye.to_frame().unwrap()).unwrap();
+            link.writer.write_all(&Message::Bye.to_frame().unwrap()).unwrap();
             // Closing with the host's Hello unread would reset the connection on Windows.
-            socket.shutdown(std::net::Shutdown::Write).unwrap();
-            let _ = std::io::copy(&mut socket, &mut std::io::sink());
+            link.shutdown_handle().unwrap().shutdown(std::net::Shutdown::Write).unwrap();
+            let _ = std::io::copy(&mut link.reader, &mut std::io::sink());
         });
 
-        let stream = TcpStream::connect(addr).unwrap();
+        let host = Identity::generate().unwrap();
+        let stream = connect_as_host(TcpStream::connect(addr).unwrap(), &host, "test host", |_| false, |_| true).unwrap();
         let shown = AtomicUsize::new(0);
         let mut events = Vec::new();
         run_mirror(

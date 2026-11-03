@@ -10,6 +10,7 @@ use std::net::TcpListener;
 use std::time::Instant;
 
 use padbridge_host::mirror::{Frame, MirrorDecoder};
+use padbridge_host::secure::{accept_as_device, Identity, SecureLink, SecureWriter};
 use padbridge_protocol::{Codec, FrameDecoder, Message, Phase, PointerKind, Role, DISPLAY_PORT, PROTOCOL_VERSION};
 
 fn main() {
@@ -21,11 +22,24 @@ fn main() {
     let mut input_sent = false;
     let listener = TcpListener::bind(("127.0.0.1", DISPLAY_PORT)).expect("bind");
     println!("fake iPad display on 127.0.0.1:{DISPLAY_PORT}");
+    // A fresh identity each run, so every host pairs anew (the code is printed instead of asked).
+    let identity = Identity::generate().expect("identity");
     for stream in listener.incoming() {
-        let mut stream = stream.expect("accept");
-        let send = |s: &mut std::net::TcpStream, m: Message| s.write_all(&m.to_frame().unwrap());
-        let _ = send(&mut stream, Message::Hello { version: PROTOCOL_VERSION, role: Role::DisplaySink, name: "Fake iPad".into() });
-        let _ = send(&mut stream, Message::DisplayInfo {
+        let stream = stream.expect("accept");
+        let link = accept_as_device(stream, &identity, "Fake iPad", |_| false, |request| {
+            println!("pairing with {} — code {}", request.peer_name, request.code);
+            Some(true)
+        });
+        let SecureLink { reader: mut stream, mut writer, .. } = match link {
+            Ok(link) => link,
+            Err(e) => {
+                println!("handshake failed: {e}");
+                continue;
+            }
+        };
+        let send = |s: &mut SecureWriter, m: Message| s.write_all(&m.to_frame().unwrap());
+        let _ = send(&mut writer, Message::Hello { version: PROTOCOL_VERSION, role: Role::DisplaySink, name: "Fake iPad".into() });
+        let _ = send(&mut writer, Message::DisplayInfo {
             width_px: 2732,
             height_px: 2048,
             scale_milli: 2000,
@@ -75,17 +89,17 @@ fn main() {
                                 azimuth: 0.5,
                             };
                             for x in [0.5, 0.55, 0.6] {
-                                let _ = send(&mut stream, pointer(PointerKind::Pen, Phase::Hover, x, 0.5));
+                                let _ = send(&mut writer, pointer(PointerKind::Pen, Phase::Hover, x, 0.5));
                             }
-                            let _ = send(&mut stream, pointer(PointerKind::Pen, Phase::Cancel, 0.6, 0.5));
-                            let _ = send(&mut stream, pointer(PointerKind::Mouse, Phase::Hover, 0.25, 0.25));
+                            let _ = send(&mut writer, pointer(PointerKind::Pen, Phase::Cancel, 0.6, 0.5));
+                            let _ = send(&mut writer, pointer(PointerKind::Mouse, Phase::Hover, 0.25, 0.25));
                             println!("sent input test");
                         }
                     }
                     Ok(None) => {}
                     Err(e) => {
                         println!("decode error: {e}");
-                        let _ = send(&mut stream, Message::RequestKeyframe);
+                        let _ = send(&mut writer, Message::RequestKeyframe);
                     }
                 }
             }

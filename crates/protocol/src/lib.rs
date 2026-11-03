@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAGIC: [u8; 4] = *b"PDBR";
 /// Upper bound for `len`; anything larger is treated as a corrupt stream.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;

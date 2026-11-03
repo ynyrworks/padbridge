@@ -14,6 +14,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbSliceU8, YUVBuffer};
 use padbridge_host::mirror::annex_b_to_avcc;
+use padbridge_host::secure::{accept_as_device, Identity, SecureLink, SecureWriter};
 use padbridge_protocol::{Codec, Message, Role, MIRROR_PORT, PROTOCOL_VERSION};
 
 const W: usize = 640;
@@ -31,27 +32,34 @@ fn main() {
         "fake-ipad.local.",
         "",
         MIRROR_PORT,
-        &[("proto", "1"), ("role", "2")][..],
+        &[("proto", "2"), ("role", "2")][..],
     )
     .expect("service info")
     .enable_addr_auto();
     mdns.register(service).expect("register");
+    // A fresh identity each run, so every host pairs anew (the code is printed instead of asked).
+    let identity = Identity::generate().expect("identity");
     for stream in listener.incoming().flatten() {
+        let identity = identity.clone();
         thread::spawn(move || {
-            if let Err(e) = serve(stream) {
+            if let Err(e) = serve(stream, &identity) {
                 println!("client gone: {e}");
             }
         });
     }
 }
 
-fn serve(mut stream: TcpStream) -> std::io::Result<()> {
-    let mut reader = stream.try_clone()?;
+fn serve(stream: TcpStream, identity: &Identity) -> Result<(), Box<dyn std::error::Error>> {
+    let link = accept_as_device(stream, identity, "Fake iPad Mirror", |_| false, |request| {
+        println!("pairing with {} — code {}", request.peer_name, request.code);
+        Some(true)
+    })?;
+    let SecureLink { mut reader, writer: mut stream, .. } = link;
     thread::spawn(move || {
         let mut buf = [0u8; 1024];
         while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
     });
-    let send = |s: &mut TcpStream, m: Message| s.write_all(&m.to_frame().unwrap());
+    let send = |s: &mut SecureWriter, m: Message| s.write_all(&m.to_frame().unwrap());
     send(&mut stream, Message::Hello { version: PROTOCOL_VERSION, role: Role::MirrorSource, name: "Fake iPad".into() })?;
 
     let mut encoder = Encoder::new().expect("encoder");

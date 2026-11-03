@@ -15,7 +15,9 @@ use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings, Encode
 use padbridge_host::gpu::{list_gpus, Gpu};
 use padbridge_host::mirror::{run_mirror, DecoderChoice, Frame, MirrorEvent};
 use padbridge_host::GpuId;
-use padbridge_host::target::{connect, resolve_target, Transport};
+use padbridge_host::pairing::HostSecurity;
+use padbridge_host::secure::{PairingRequest, SecureLink};
+use padbridge_host::target::{open, resolve_target, Transport};
 use padbridge_host::{host_name, ping_session, Event};
 use padbridge_protocol::{Role, DISPLAY_PORT, MIRROR_PORT};
 
@@ -42,9 +44,42 @@ pub struct PadBridgeApp {
     vdd_busy: Arc<AtomicBool>,
     /// Set by background work that changed the monitors.
     monitors_changed: Arc<AtomicBool>,
+    security: Option<Arc<HostSecurity>>,
+    pairing_prompt: Arc<Mutex<Option<PairingPrompt>>>,
     log: VecDeque<String>,
     log_tx: Sender<String>,
     log_rx: Receiver<String>,
+}
+
+/// A pairing request waiting for the user's answer.
+struct PairingPrompt {
+    request: PairingRequest,
+    answer: mpsc::Sender<bool>,
+}
+
+/// Opens secure connections from worker threads, asking the user (through
+/// the UI thread) before pairing with a new iPad.
+#[derive(Clone)]
+struct Opener {
+    security: Option<Arc<HostSecurity>>,
+    prompt: Arc<Mutex<Option<PairingPrompt>>>,
+    ctx: egui::Context,
+}
+
+impl Opener {
+    fn open(&self, transport: &Transport, port: u16) -> Result<SecureLink, padbridge_host::BoxError> {
+        let security = self.security.as_ref().ok_or("無法載入這台電腦的金鑰（見事件紀錄）")?;
+        open(transport, port, security, |request| {
+            let (answer, response) = mpsc::channel();
+            *self.prompt.lock().unwrap() = Some(PairingPrompt { request: request.clone(), answer });
+            self.ctx.request_repaint();
+            // No answer within two minutes (or the dialog went away) counts as no.
+            let accepted = response.recv_timeout(Duration::from_secs(120)).unwrap_or(false);
+            self.prompt.lock().unwrap().take();
+            self.ctx.request_repaint();
+            accepted
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -129,10 +164,16 @@ impl PadBridgeApp {
             decoder_choice: DecoderChoice::Auto,
             vdd_busy: Arc::new(AtomicBool::new(false)),
             monitors_changed: Arc::new(AtomicBool::new(false)),
+            security: None,
+            pairing_prompt: Arc::new(Mutex::new(None)),
             log: VecDeque::new(),
             log_tx,
             log_rx,
         };
+        match HostSecurity::load() {
+            Ok(security) => app.security = Some(Arc::new(security)),
+            Err(e) => app.push_log(format!("無法載入這台電腦的金鑰，將無法連線：{e}")),
+        }
         app.refresh_monitors();
         // `PadBridge.exe --mirror <target>` / `--display <target>` start right away (handy for shortcuts).
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -203,6 +244,65 @@ impl PadBridgeApp {
         }
     }
 
+    fn opener(&self) -> Opener {
+        Opener { security: self.security.clone(), prompt: self.pairing_prompt.clone(), ctx: self.ctx.clone() }
+    }
+
+    /// The pairing confirmation, shown on top of everything while a worker waits.
+    fn pairing_dialog(&mut self, ctx: &egui::Context) {
+        let mut slot = self.pairing_prompt.lock().unwrap();
+        let Some(prompt) = slot.as_ref() else { return };
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("pairing")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(format!("與「{}」配對？", prompt.request.peer_name));
+            ui.add_space(8.0);
+            ui.label("確認 iPad 上顯示的是同一組數字，再兩邊都按「配對」：");
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                let code = &prompt.request.code;
+                ui.label(RichText::new(format!("{} {}", &code[..3], &code[3..])).size(40.0).monospace().strong());
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("數字不同就按取消：可能有人冒充你的 iPad。").small().weak());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("配對").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("取消").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if let Some(answer) = answer {
+            if let Some(prompt) = slot.take() {
+                let _ = prompt.answer.send(answer);
+            }
+        }
+    }
+
+    /// Paired iPads, each with a way to forget it.
+    fn paired_list(&mut self, ui: &mut egui::Ui) {
+        let Some(security) = self.security.clone() else { return };
+        let devices = security.devices();
+        ui.label(RichText::new("已配對的 iPad").strong());
+        if devices.is_empty() {
+            ui.label(RichText::new("尚未配對。第一次連線時，兩邊會顯示同一組 6 位數字讓你確認。").small().weak());
+        }
+        for device in devices {
+            ui.horizontal(|ui| {
+                ui.label(&device.name).on_hover_text(format!("金鑰 {}…", &device.key[..16]));
+                if ui.small_button("取消配對").clicked() {
+                    match security.forget(&device.key) {
+                        Ok(()) => self.push_log(format!("已取消與「{}」的配對", device.name)),
+                        Err(e) => self.push_log(format!("無法取消配對：{e}")),
+                    }
+                }
+            });
+        }
+    }
+
     fn start_mirror(&mut self, title: String, transport: Transport, port: u16) {
         self.stop_sessions();
         self.push_log(format!("開始鏡像：{title}"));
@@ -211,8 +311,9 @@ impl PadBridgeApp {
         let ctx = self.ctx.clone();
         let log = self.log_tx.clone();
         let decoder = self.decoder_choice;
+        let opener = self.opener();
         thread::spawn(move || {
-            let stream = match connect(&transport, port) {
+            let stream = match opener.open(&transport, port) {
                 Ok(s) => s,
                 Err(e) => {
                     let reason = format!("連線失敗：{e}");
@@ -227,7 +328,7 @@ impl PadBridgeApp {
                 if s.stop_requested {
                     return;
                 }
-                s.shutdown = stream.try_clone().ok();
+                s.shutdown = stream.shutdown_handle().ok();
             }
             let frame_shared = worker_shared.clone();
             let frame_ctx = ctx.clone();
@@ -285,8 +386,9 @@ impl PadBridgeApp {
         let log = self.log_tx.clone();
         let ctx = self.ctx.clone();
         let _ = log.send(format!("測試連線：{title}"));
+        let opener = self.opener();
         thread::spawn(move || {
-            let result = connect(&transport, port).and_then(|stream| {
+            let result = opener.open(&transport, port).and_then(|stream| {
                 ping_session(stream, &host_name(), 5, Duration::from_millis(200), |event| {
                     if let Event::Received(padbridge_protocol::Message::Hello { name, .. }) = event {
                         let _ = log.send(format!("已連上 {name}"));
@@ -360,6 +462,10 @@ impl PadBridgeApp {
         ui.add_space(12.0);
         ui.separator();
         self.codec_picker(ui);
+
+        ui.add_space(12.0);
+        ui.separator();
+        self.paired_list(ui);
 
         ui.add_space(12.0);
         ui.separator();
@@ -598,10 +704,11 @@ impl PadBridgeApp {
         let stop = Arc::new(AtomicBool::new(false));
         let (worker_shared, worker_stop, ctx, log) = (shared.clone(), stop.clone(), self.ctx.clone(), self.log_tx.clone());
         let worker_transport = transport.clone();
+        let opener = self.opener();
         thread::spawn(move || {
             let transport = worker_transport;
             let mut refit = None;
-            let stream = match connect(&transport, port) {
+            let stream = match opener.open(&transport, port) {
                 Ok(s) => s,
                 Err(e) => {
                     let reason = format!("連線失敗：{e}");
@@ -776,6 +883,7 @@ impl eframe::App for PadBridgeApp {
         self.poll_background();
         // Discovery events arrive on background threads without waking the UI.
         ui.ctx().request_repaint_after(Duration::from_millis(500));
+        self.pairing_dialog(&ui.ctx().clone());
 
         egui::Panel::left("devices").resizable(true).default_size(290.0).min_size(230.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.device_list(ui));

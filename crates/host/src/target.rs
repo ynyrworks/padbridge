@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use padbridge_usbmux::{ConnectionType, Device, Usbmux};
 
+use crate::pairing::HostSecurity;
+use crate::secure::{PairingRequest, SecureLink};
 use crate::BoxError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -32,6 +34,18 @@ pub fn connect(transport: &Transport, port: u16) -> Result<TcpStream, BoxError> 
     };
     stream.set_nodelay(true)?;
     Ok(stream)
+}
+
+/// Connects and runs the secure handshake; `confirm` is asked about an iPad
+/// this computer hasn't paired with yet.
+pub fn open(
+    transport: &Transport,
+    port: u16,
+    security: &HostSecurity,
+    confirm: impl FnOnce(&PairingRequest) -> bool,
+) -> Result<SecureLink, BoxError> {
+    let stream = connect(transport, port)?;
+    Ok(security.connect(stream, &crate::host_name(), confirm)?)
 }
 
 /// Parses `usb`, `usb:<port>`, `usb:<udid>` or `usb:<udid>:<port>`.

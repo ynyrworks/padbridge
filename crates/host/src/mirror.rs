@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
 use std::thread;
@@ -16,6 +16,7 @@ use padbridge_protocol::{Codec, FrameDecoder, Message, Role, PROTOCOL_VERSION};
 
 #[cfg(windows)]
 use crate::hwdec::HardwareDecoder;
+use crate::secure::SecureLink;
 use crate::GpuId;
 
 /// What a mirror session reports besides frames.
@@ -35,19 +36,16 @@ pub enum MirrorEvent {
 }
 
 /// Runs a mirror session on the calling thread until the iPad disconnects,
-/// `on_frame` returns `false`, or the stream is shut down from elsewhere
-/// (`TcpStream::shutdown` on a clone is the way to stop it).
+/// `on_frame` returns `false`, or the connection is shut down from elsewhere
+/// (`SecureLink::shutdown_handle` is the way to stop it).
 pub fn run_mirror(
-    mut stream: TcpStream,
+    link: SecureLink,
     host_name: &str,
     choice: DecoderChoice,
     mut on_frame: impl FnMut(Frame) -> bool + Send,
     mut on_event: impl FnMut(MirrorEvent),
 ) {
-    let mut writer = match stream.try_clone() {
-        Ok(w) => w,
-        Err(e) => return on_event(MirrorEvent::Ended(format!("連線錯誤：{e}"))),
-    };
+    let SecureLink { reader: mut stream, mut writer, .. } = link;
     let mut send = |msg: Message| writer.write_all(&msg.to_frame().expect("small message"));
     if let Err(e) = send(Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() }) {
         return on_event(MirrorEvent::Ended(format!("連線錯誤：{e}")));

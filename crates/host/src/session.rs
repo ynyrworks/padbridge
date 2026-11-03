@@ -1,12 +1,13 @@
 //! Test session: handshake with an iPad and measure round-trip time.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use padbridge_protocol::{FrameDecoder, Message, Role, PROTOCOL_VERSION};
+
+use crate::secure::{SecureLink, SecureWriter};
 
 /// Something the session observed, reported as it happens.
 #[derive(Debug)]
@@ -24,16 +25,15 @@ pub struct Summary {
 /// Sends `Hello`, then `count` pings spaced by `interval`, and says `Bye`.
 /// Waits up to one second after the last ping for outstanding pongs.
 pub fn ping_session(
-    stream: TcpStream,
+    link: SecureLink,
     name: &str,
     count: u32,
     interval: Duration,
     mut on_event: impl FnMut(&Event),
 ) -> io::Result<Summary> {
-    stream.set_nodelay(true)?;
     let start = Instant::now();
     let (tx, rx) = mpsc::channel();
-    let mut reader = stream.try_clone()?;
+    let SecureLink { mut reader, writer, .. } = link;
     thread::spawn(move || {
         let mut decoder = FrameDecoder::new();
         let mut buf = [0u8; 64 * 1024];
@@ -57,8 +57,8 @@ pub fn ping_session(
         }
     });
 
-    let mut writer = stream;
-    let send = |w: &mut TcpStream, msg: Message| -> io::Result<()> {
+    let mut writer = writer;
+    let send = |w: &mut SecureWriter, msg: Message| -> io::Result<()> {
         w.write_all(&msg.to_frame().map_err(io::Error::other)?)
     };
     send(&mut writer, Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: name.into() })?;

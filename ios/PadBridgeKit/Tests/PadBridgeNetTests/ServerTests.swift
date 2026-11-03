@@ -3,29 +3,56 @@ import PadBridgeProtocol
 @testable import PadBridgeNet
 
 final class ServerTests: XCTestCase {
-    func testHelloAndPingOverLoopback() throws {
-        let server = Server(role: .displaySink, name: "Test iPad", port: 0, advertise: false)
+    private func temporaryStore() -> PairingStore {
+        PairingStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("pairing-\(UUID()).json"),
+                     isShared: true)
+    }
+
+    private func startServer(_ server: Server) throws -> UInt16 {
         let ready = expectation(description: "listener ready")
-        let gotClientHello = expectation(description: "server saw client hello")
         var port: UInt16 = 0
+        let previous = server.onEvent
         server.onEvent = { event in
-            switch event {
-            case let .ready(p):
+            if case let .ready(p) = event {
                 port = p
                 ready.fulfill()
-            case .hello(_, name: "Test PC", role: .host):
-                gotClientHello.fulfill()
-            default:
-                break
             }
+            previous?(event)
         }
         try server.start()
         wait(for: [ready], timeout: 5)
         XCTAssertNotEqual(port, 0)
+        return port
+    }
 
+    private func hostConfig(_ identity: DeviceIdentity = DeviceIdentity(), confirm: @escaping (PairingRequest) -> Bool = { _ in true })
+        -> SecureConfig {
+        SecureConfig(identity: identity, name: "Test PC", role: .host(isKnown: { _ in false }, confirm: confirm))
+    }
+
+    func testPairingThenHelloAndPing() throws {
+        let store = temporaryStore()
+        let server = Server(role: .displaySink, name: "Test iPad", port: 0, advertise: false, store: store)
+        let gotClientHello = expectation(description: "server saw client hello")
+        var serverCode = ""
+        server.onPairingRequest = { _, request, respond in
+            serverCode = request.code
+            respond(true)
+        }
+        server.onEvent = { event in
+            if case .hello(_, name: "Test PC", role: .host) = event { gotClientHello.fulfill() }
+        }
+        let port = try startServer(server)
+
+        let host = DeviceIdentity()
+        var clientCode = ""
         let gotServerHello = expectation(description: "client saw server hello")
         let gotPong = expectation(description: "client got pong")
-        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"))
+        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"),
+                                    security: hostConfig(host) { request in
+                                        clientCode = request.code
+                                        return true
+                                    })
         client.onReady = {
             client.send(.hello(version: Wire.protocolVersion, role: .host, name: "Test PC"))
             client.send(.ping(nonce: 7, tUs: 123))
@@ -39,8 +66,28 @@ final class ServerTests: XCTestCase {
         }
         client.start()
         wait(for: [gotServerHello, gotClientHello, gotPong], timeout: 5)
+        XCTAssertEqual(clientCode.count, 6)
+        XCTAssertEqual(clientCode, serverCode, "both screens must show the same code")
+        XCTAssertTrue(store.isPaired(host.publicKey))
+        XCTAssertEqual(client.peerName, "Test iPad")
 
         client.close()
+        server.stop()
+    }
+
+    func testUnpairedHostIsRefusedWithoutPairingHandler() throws {
+        let server = Server(role: .mirrorSource, name: "Mirror", port: 0, advertise: false, store: temporaryStore())
+        let port = try startServer(server)
+        let closed = expectation(description: "client closed")
+        let client = PeerConnection(host: "127.0.0.1", port: port, queue: DispatchQueue(label: "test.client"),
+                                    security: hostConfig())
+        client.onReady = { XCTFail("an unpaired host must not get in") }
+        client.onClose = { error in
+            XCTAssertEqual(error as? SecureError, .refused(.notPaired))
+            closed.fulfill()
+        }
+        client.start()
+        wait(for: [closed], timeout: 5)
         server.stop()
     }
 

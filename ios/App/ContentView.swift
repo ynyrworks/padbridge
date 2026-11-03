@@ -1,5 +1,6 @@
 import AVFoundation
 import PadBridgeMedia
+import PadBridgeNet
 import PadBridgeProtocol
 import ReplayKit
 import SwiftUI
@@ -36,6 +37,27 @@ struct ContentView: View {
                     } footer: {
                         Text("選「PadBridge Mirror」並開始廣播，再到 Windows 按「📺 鏡像」。也可以從控制中心長按螢幕錄影按鈕開始。")
                     }
+                    Section {
+                        if display.pairedHosts.isEmpty {
+                            Text("尚未配對。電腦第一次連線時，兩邊會顯示同一組 6 位數字讓你確認。")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(display.pairedHosts) { host in
+                            HStack {
+                                Text(host.name)
+                                Spacer()
+                                Button("取消配對", role: .destructive) { display.unpair(host) }
+                                    .buttonStyle(.borderless)
+                            }
+                        }
+                    } header: {
+                        Text("已配對的電腦")
+                    } footer: {
+                        if !display.pairingShared {
+                            Text("這個安裝缺少 App Group，廣播擴充讀不到配對資料，所以鏡像會拒絕所有電腦。請用支援 App Group 的方式重新簽章安裝。")
+                                .foregroundStyle(.red)
+                        }
+                    }
                     Section("事件") {
                         ForEach(display.log) { line in
                             VStack(alignment: .leading) {
@@ -58,6 +80,15 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: display.streamInfo != nil)
+        .alert("配對新的電腦", isPresented: Binding(get: { display.pendingPairing != nil },
+                                                 set: { if !$0 { display.answerPairing(false) } }),
+               presenting: display.pendingPairing) { _ in
+            Button("配對") { display.answerPairing(true) }
+            Button("取消", role: .cancel) { display.answerPairing(false) }
+        } message: { pending in
+            let code = pending.request.code
+            Text("「\(pending.request.peerName)」想連線到這台 iPad。\n\n\(String(code.prefix(3))) \(String(code.suffix(3)))\n\n電腦上顯示的數字相同才按「配對」；不同代表可能有人冒充。")
+        }
         .statusBarHidden(display.streamInfo != nil)
         .persistentSystemOverlays(display.streamInfo != nil ? .hidden : .automatic)
     }
