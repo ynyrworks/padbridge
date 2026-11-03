@@ -74,7 +74,9 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.broadcast-services-upload
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
-          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+          # Must sit under NSExtensionAttributes; elsewhere iOS lists the extension but won't let it be picked.
+          NSExtensionAttributes:
+            RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.padbridge.app.broadcast
