@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,7 @@ pub enum MirrorEvent {
 pub fn run_mirror(
     mut stream: TcpStream,
     host_name: &str,
-    mut on_frame: impl FnMut(Frame) -> bool,
+    mut on_frame: impl FnMut(Frame) -> bool + Send,
     mut on_event: impl FnMut(MirrorEvent),
 ) {
     let mut writer = match stream.try_clone() {
@@ -78,20 +79,58 @@ pub fn run_mirror(
         }
     });
 
+    // Converting to RGB (and whatever `on_frame` does with the result) runs on
+    // a second thread fed through a one-picture slot, so decoding alone sets
+    // the pace and a slow conversion only skips pictures.
+    let slot = Slot::default();
+    let stopped = AtomicBool::new(false);
+    let end = thread::scope(|scope| {
+        let (slot, stopped) = (&slot, &stopped);
+        scope.spawn(move || {
+            let on_frame = &mut on_frame;
+            while let Some(planes) = slot.take() {
+                if !on_frame(planes.to_frame()) {
+                    stopped.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+        let end = decode_loop(&rx, &mut decoder, slot, stopped, &mut send, &mut on_event);
+        slot.close();
+        end
+    });
+    on_event(MirrorEvent::Ended(end));
+}
+
+/// Decodes everything the reader thread delivers, handing the newest picture
+/// to `slot`. Returns why the session ended.
+fn decode_loop(
+    rx: &mpsc::Receiver<Result<Message, String>>,
+    decoder: &mut MirrorDecoder,
+    slot: &Slot,
+    stopped: &AtomicBool,
+    send: &mut impl FnMut(Message) -> std::io::Result<()>,
+    on_event: &mut impl FnMut(MirrorEvent),
+) -> String {
     let mut queue = VecDeque::new();
     let mut stats = Stats::default();
     loop {
         if queue.is_empty() {
-            match rx.recv() {
+            match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(item) => queue.push_back(item),
-                Err(_) => return on_event(MirrorEvent::Ended("連線結束".into())),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return "連線結束".into(),
             }
+        }
+        if stopped.load(Ordering::Relaxed) {
+            let _ = send(Message::Bye);
+            return "已停止".into();
         }
         queue.extend(rx.try_iter());
         while let Some(item) = queue.pop_front() {
             let msg = match item {
                 Ok(msg) => msg,
-                Err(reason) => return on_event(MirrorEvent::Ended(reason)),
+                Err(reason) => return reason,
             };
             let newest = !queue.iter().any(|m| matches!(m, Ok(Message::VideoFrame { .. })));
             if let Message::VideoFrame { data, .. } = &msg {
@@ -108,7 +147,7 @@ pub fn run_mirror(
                 stats = Stats::default();
             }
             let started = Instant::now();
-            let result = decoder.handle_frame(&msg, newest);
+            let result = decoder.handle_planes(&msg, newest);
             stats.busy += started.elapsed();
             match &msg {
                 Message::Hello { name, .. } => on_event(MirrorEvent::Connected { name: name.clone() }),
@@ -120,25 +159,55 @@ pub fn run_mirror(
                     bitrate_kbps: *bitrate_kbps,
                 }),
                 Message::Log { text, .. } => on_event(MirrorEvent::Log(text.clone())),
-                Message::Bye => return on_event(MirrorEvent::Ended("iPad 結束廣播".into())),
+                Message::Bye => return "iPad 結束廣播".into(),
                 _ => {}
             }
             match result {
-                Ok(Some(frame)) => {
-                    if !on_frame(frame) {
-                        let _ = send(Message::Bye);
-                        return on_event(MirrorEvent::Ended("已停止".into()));
-                    }
-                }
+                Ok(Some(planes)) => slot.put(planes),
                 Ok(None) => {}
-                Err(e @ MirrorError::UnsupportedCodec(_)) => return on_event(MirrorEvent::Ended(e.to_string())),
+                Err(e @ MirrorError::UnsupportedCodec(_)) => return e.to_string(),
                 Err(e) => {
                     on_event(MirrorEvent::DecodeError(e.to_string()));
                     if send(Message::RequestKeyframe).is_err() {
-                        return on_event(MirrorEvent::Ended("連線中斷".into()));
+                        return "連線中斷".into();
                     }
                 }
             }
+        }
+    }
+}
+
+/// Holds at most one picture between the decoder and the converter; a newer
+/// one replaces any the converter hasn't picked up yet.
+#[derive(Default)]
+struct Slot {
+    /// The pending picture, and whether the decoder has finished.
+    state: Mutex<(Option<DecodedPlanes>, bool)>,
+    changed: Condvar,
+}
+
+impl Slot {
+    fn put(&self, planes: DecodedPlanes) {
+        self.state.lock().unwrap().0 = Some(planes);
+        self.changed.notify_one();
+    }
+
+    fn close(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_one();
+    }
+
+    /// Waits for the next picture; `None` once closed.
+    fn take(&self) -> Option<DecodedPlanes> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if let Some(planes) = state.0.take() {
+                return Some(planes);
+            }
+            if state.1 {
+                return None;
+            }
+            state = self.changed.wait(state).unwrap();
         }
     }
 }
@@ -212,6 +281,12 @@ impl MirrorDecoder {
     /// Like [`handle`](Self::handle), but with `want_image` false a video
     /// frame is only decoded (to keep the reference chain), not converted.
     pub fn handle_frame(&mut self, msg: &Message, want_image: bool) -> Result<Option<Frame>, MirrorError> {
+        Ok(self.handle_planes(msg, want_image)?.map(|planes| planes.to_frame()))
+    }
+
+    /// Like [`handle_frame`](Self::handle_frame), but returns the decoded
+    /// planes so the RGB conversion can run on another thread.
+    pub fn handle_planes(&mut self, msg: &Message, want_image: bool) -> Result<Option<DecodedPlanes>, MirrorError> {
         match msg {
             Message::StreamConfig { codec, .. } | Message::CodecParams { codec, .. } if *codec != Codec::H264 => {
                 Err(MirrorError::UnsupportedCodec(*codec))
@@ -239,15 +314,62 @@ impl MirrorDecoder {
         rotation: u8,
         data: &[u8],
         want_image: bool,
-    ) -> Result<Option<Frame>, MirrorError> {
+    ) -> Result<Option<DecodedPlanes>, MirrorError> {
         let mut packet = if keyframe { self.params.clone() } else { Vec::new() };
         packet.extend(avcc_to_annex_b(data).ok_or(MirrorError::BadAvcc)?);
         let Some(yuv) = self.decoder.decode(&packet).map_err(MirrorError::Decode)? else { return Ok(None) };
         if !want_image {
             return Ok(None);
         }
-        let (width, height, pixels) = yuv_to_xrgb_rotated(&yuv, rotation);
-        Ok(Some(Frame { width, height, pixels, pts_us }))
+        Ok(Some(DecodedPlanes {
+            size: yuv.dimensions(),
+            strides: yuv.strides(),
+            y: yuv.y().to_vec(),
+            u: yuv.u().to_vec(),
+            v: yuv.v().to_vec(),
+            rotation,
+            pts_us,
+        }))
+    }
+}
+
+/// An owned copy of a decoded I420 picture, still to be converted to RGB.
+pub struct DecodedPlanes {
+    size: (usize, usize),
+    strides: (usize, usize, usize),
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    rotation: u8,
+    pts_us: u64,
+}
+
+impl DecodedPlanes {
+    pub fn to_frame(&self) -> Frame {
+        let (width, height, pixels) = yuv_to_xrgb_rotated(self, self.rotation);
+        Frame { width, height, pixels, pts_us: self.pts_us }
+    }
+}
+
+impl YUVSource for DecodedPlanes {
+    fn dimensions(&self) -> (usize, usize) {
+        self.size
+    }
+
+    fn strides(&self) -> (usize, usize, usize) {
+        self.strides
+    }
+
+    fn y(&self) -> &[u8] {
+        &self.y
+    }
+
+    fn u(&self) -> &[u8] {
+        &self.u
+    }
+
+    fn v(&self) -> &[u8] {
+        &self.v
     }
 }
 

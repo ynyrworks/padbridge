@@ -584,6 +584,52 @@ mod tests {
     }
 
     #[test]
+    fn run_mirror_delivers_frames_and_ends() {
+        use crate::mirror::{run_mirror, MirrorEvent};
+        use padbridge_protocol::{Role, PROTOCOL_VERSION};
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ipad = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let settings = DisplaySettings { max_width: 320, ..DisplaySettings::default() };
+            let mut pipeline = VideoPipeline::new(settings).unwrap();
+            let hello = Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: "test iPad".into() };
+            socket.write_all(&hello.to_frame().unwrap()).unwrap();
+            for i in 0..10 {
+                for m in pipeline.encode(&ScreenImage { width: 320, height: 200, bgra: &gradient(320, 200, i) }).unwrap() {
+                    socket.write_all(&m.to_frame().unwrap()).unwrap();
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            socket.write_all(&Message::Bye.to_frame().unwrap()).unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let shown = AtomicUsize::new(0);
+        let mut events = Vec::new();
+        run_mirror(
+            stream,
+            "test host",
+            |frame| {
+                assert_eq!((frame.width, frame.height), (320, 200));
+                shown.fetch_add(1, Ordering::Relaxed);
+                true
+            },
+            |event| events.push(event),
+        );
+        ipad.join().unwrap();
+        assert!(shown.load(Ordering::Relaxed) >= 1, "no frame shown");
+        assert!(events.contains(&MirrorEvent::Connected { name: "test iPad".into() }));
+        assert_eq!(events.last(), Some(&MirrorEvent::Ended("iPad 結束廣播".into())));
+    }
+
+    #[test]
     fn fused_conversion_matches_reference() {
         use crate::mirror::{avcc_to_annex_b, rotate, yuv_to_xrgb_rotated};
         use openh264::decoder::Decoder;
