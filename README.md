@@ -23,12 +23,12 @@
 ### Windows
 
 1. 安裝 **iTunes**（Apple 官網的桌面版）或 Microsoft Store 的「**Apple 裝置**」App。USB 連線需要它提供的 Apple Mobile Device Service。
-2. 從 [Actions](https://github.com/ynyrworks/padbridge/actions) 最新一次成功的建置下載 `PadBridge-windows`，解壓後執行 `PadBridge.exe`。裡面也有命令列版 `padbridge-cli.exe` 與授權檔。
+2. 從 [Releases](https://github.com/ynyrworks/padbridge/releases/latest) 下載 `PadBridge-…-windows-x64.zip`，解壓後執行 `PadBridge.exe`。裡面也有命令列版 `padbridge-cli.exe` 與授權檔。想試最新開發版，可以從 [Actions](https://github.com/ynyrworks/padbridge/actions) 最新一次成功建置下載 `PadBridge-windows`。
 3. 第一次執行時，Windows 防火牆可能會詢問，請允許「私人網路」（Bonjour 需要）。
 
 ### iPad（不需要 Mac）
 
-1. 從同一次建置下載 `PadBridge-unsigned-ipa`。
+1. 從 [Releases](https://github.com/ynyrworks/padbridge/releases/latest) 下載 `PadBridge-…-unsigned.ipa`（開發版則是 Actions 的 `PadBridge-unsigned-ipa`）。
 2. 在 Windows 用 [Sideloadly](https://sideloadly.io/) 搭配自己的 Apple ID 簽章，透過 USB 安裝到 iPad。免費 Apple ID 每 7 天要重簽一次。
 3. 在 iPad 上：
    - 「設定 → 一般 → VPN 與裝置管理」信任你的開發者描述檔；
