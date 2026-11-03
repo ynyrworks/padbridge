@@ -17,12 +17,17 @@ jobs:
       - name: Build Windows binaries
         run: cargo build --release -p padbridge-app -p padbridge-cli
 
+      - name: Package with licenses
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/PadBridge.exe, target/release/padbridge-cli.exe, LICENSE, THIRD_PARTY_NOTICES.md dist/
+          Copy-Item -Recurse licenses dist/licenses
+
       - uses: actions/upload-artifact@v5
         with:
           name: PadBridge-windows
-          path: |
-            target/release/PadBridge.exe
-            target/release/padbridge-cli.exe
+          path: dist/
 
   ios:
     runs-on: macos-15

@@ -1,6 +1,6 @@
 # PadBridge 架構設計
 
-> 狀態：草案 v0.1（2026-11-02）・授權：MIT
+> 狀態：v0.1.0（2026-11-03），M0–M5 完成並在實機驗證・授權：MIT
 
 PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（Wi‑Fi / 區網）都走同一套協定：
 
@@ -14,12 +14,12 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 ```
 ┌──────────────────────── Windows ────────────────────────┐        ┌──────────────── iPad ────────────────┐
 │ 虛擬螢幕驅動 (IddCx, 沿用 MIT 開源 VDD)                    │        │ PadBridge App (Swift)                 │
-│        │ 新增/移除螢幕、設定解析度                           │        │  ├─ Display 接收端                     │
+│        │ 設定檔 + named pipe：解析度、螢幕數量               │        │  ├─ Display 接收端                     │
 │ padbridge-host (Rust)                                    │        │  │   Network.framework 監聽 :47800     │
-│  ├─ 擷取  Windows.Graphics.Capture / DXGI Duplication    │        │  │   VideoToolbox 解碼                 │
-│  ├─ 編碼  Media Foundation 硬體 MFT (H.264 / HEVC)        │  TCP   │  │   AVSampleBufferDisplayLayer        │
+│  ├─ 擷取  DXGI Desktop Duplication                       │        │  │   VideoToolbox 解碼                 │
+│  ├─ 編碼  MF 硬體 H.264 MFT（可選 GPU）/ OpenH264          │  TCP   │  │   AVSampleBufferDisplayLayer        │
 │  ├─ 輸入  InjectSyntheticPointerInput (觸控 / 筆)         │◀──────▶│  │   觸控 / Pencil → Pointer 訊息       │
-│  ├─ 鏡像檢視器  MF 解碼 + D3D11 呈現                       │        │  └─ Bonjour 廣播 _padbridge._tcp       │
+│  ├─ 鏡像檢視器  MF 硬體解碼 + D3D11 轉換 / OpenH264        │        │  └─ Bonjour 廣播 _padbridge._tcp       │
 │  ├─ 傳輸  usbmux（USB）/ mDNS + TCP（無線）                │        │ Broadcast Upload Extension (ReplayKit)│
 │  └─ 共用 crates/protocol                                 │        │   VTCompressionSession → 監聽 :47801   │
 └──────────────────────────────────────────────────────────┘        └───────────────────────────────────────┘
@@ -108,9 +108,16 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
   - 旋轉方向取自 `RPVideoSampleOrientationKey`，放在 `VideoFrame` 的 flags 裡。
 - 背壓：`Server.broadcastVideo` 對「積壓 ≥ 6 則訊息」或「正在等關鍵幀」的連線直接丟棄差異幀，並要求編碼器產生關鍵幀。
 - 靜止畫面：新連線加入，或收到 `RequestKeyframe` 時，如果 ReplayKit 沒有送新幀，就用最後一幀重新編碼成關鍵幀。
-- Windows：`padbridge-cli mirror` 用 OpenH264 解碼（目前只保證支援 Constrained Baseline），再用 minifb 顯示；解碼失敗時會送 `RequestKeyframe`。
+- 旋轉：ReplayKit 的 `RPVideoSampleOrientationKey` 與 EXIF 的定義相反（實機確認：`.left` 需要順時針轉 90°），所以 `.left` → 1、`.right` → 3。
+- Windows：`run_mirror` 分三個執行緒：
+  - 讀取執行緒：解析訊框後放進佇列，讓積壓看得見。
+  - 解碼執行緒：每一格都要解碼（後面的格會參考前面的），但只有佇列中**最新**的一格會產生畫面，交給一格大小的交接區（新的覆蓋舊的）。
+  - 轉換執行緒：把交接區的畫面轉成 RGB 交給呼叫端。軟體解碼時在這裡做 YUV→RGB；硬體解碼時 GPU 已經轉好。
+  - 這樣接收端比 iPad 慢時只會略過畫面，延遲不會累積。解碼失敗時會送 `RequestKeyframe`。
+- 軟體路徑的 YUV→RGB（BT.601 limited range）與旋轉合併成一次多執行緒處理：每個輸出像素直接讀取旋轉前的位置，1334×1920 約 3.4 ms（原本分開轉換、重排、旋轉約 13 ms）。
+- 實機（RTX 3050 Laptop、軟體解碼）：收到 60 fps、顯示約 60 fps、解碼約 14 ms。
 - 待辦：
-  - 改用 Media Foundation 硬體解碼加 D3D11 顯示，支援 High profile 與 HEVC。
+  - 支援 High profile 與 HEVC。
   - 改用 Cisco 發佈的 OpenH264 二進位檔，以涵蓋 H.264 專利授權。
 
 ### 4.2 Display 模式實作（M4）
@@ -139,6 +146,32 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 - 找不到硬體編碼器時，自動改用 CPU 讀回加 OpenH264。
 - 游標改用 `Cursor` 訊息送到 iPad，由 iPad 繪製（`CursorLayer`），所以只有游標移動時不用重新編碼。
 - 基準測試：`cargo test --release -p padbridge-host bench_hardware -- --ignored --nocapture`。在 RTX 5080 上，4K → 1080p 每幀 1.94 ms，1440p → 1080p 每幀 1.93 ms。
+- 同時有內顯與獨顯時，兩張卡各有自己的編碼器 MFT。`MFTEnumEx` 列出的編碼器會依 `MFT_ENUM_ADAPTER_LUID` 排序，優先使用與 D3D11 裝置同一張 GPU 的那個。
+
+### 4.5 硬體解碼（Mirror）
+
+- `hwdec::HardwareDecoder`：
+  - 在選定 GPU 上建立具 video support 與 multithread protection 的 D3D11 裝置，透過 `IMFDXGIDeviceManager` 交給 Media Foundation 的 H.264 解碼器（同步 MFT，DXVA）。
+  - 開啟 `CODECAPI_AVLowLatencyMode`，每輸入一格就立刻輸出（有測試確認沒有延遲一格）。
+  - 輸出是 NV12 貼圖陣列的一個 slice；D3D11 Video Processor 依 `MF_MT_MINIMUM_DISPLAY_APERTURE` 裁掉 16 像素對齊的補白，順時針旋轉（`VideoProcessorSetStreamRotation`），轉成 BGRA，再讀回系統記憶體。
+  - GPU 不支援旋轉時，改在 CPU 旋轉。
+- `MirrorDecoder` 依 `DecoderChoice` 選擇硬體或 OpenH264；硬體初始化失敗時自動改用軟體，原因以 `MirrorEvent::Decoder` 回報。
+- 基準（1334×1920，解碼＋旋轉＋讀回）：RTX 5080 約 3.8 ms／格；OpenH264 解碼 8.4 ms＋轉換 3.4 ms。
+
+### 4.6 選擇 GPU
+
+- `gpu::list_gpus`：列出 DXGI 的硬體介面卡，略過軟體介面卡（Microsoft Basic Render Driver），以及間接顯示驅動（例如 StarDesk、MuMu、VDD）額外產生、名稱與實體 GPU 相同的介面卡（以 `DisplayConfigGetDeviceInfo` 查出裝置路徑在 `ROOT\` 或 `SWD\` 下）。專用記憶體少於 512 MB 視為內顯。
+- `Monitor.gpu`：負責繪製該螢幕的 GPU（也就是 Desktop Duplication 擷取所在的 GPU）。
+- `EncoderChoice`（延伸螢幕）：自動（螢幕所在 GPU）／指定 GPU／CPU。指定的 GPU 不是螢幕所在 GPU 時，擷取改為讀回系統記憶體，再用 `UpdateSubresource` 上傳到編碼 GPU 的貼圖（`Upload`）。
+- `DecoderChoice`（鏡像）：自動（獨顯優先）／指定 GPU／CPU。
+
+### 4.7 虛擬螢幕
+
+- `vdisplay`：用 `QueryDisplayConfig` 找出每個螢幕實際所屬的介面卡，裝置路徑在 `ROOT\` 或 `SWD\` 下就是虛擬螢幕；也用 SetupAPI 列出已安裝但沒有開螢幕的虛擬顯示卡。DXGI 會把間接顯示的輸出列在負責繪製的 GPU 底下，所以不能只看介面卡名稱。
+- `vdd`：整合 Virtual Display Driver（硬體 ID `Root\MttVDD`）。
+  - 安裝：用 winget 安裝上游的控制程式（`VirtualDrivers.Virtual-Display-Driver`）並開啟，由使用者在其中安裝已簽章的驅動。
+  - 開啟螢幕：對 `\\.\pipe\MTTVirtualDisplayPipe` 送 `SETDISPLAYCOUNT 1`（UTF-16 訊息，任何使用者都能連）。
+  - 配合 iPad 解析度：收到 `DisplayInfo` 後，若虛擬螢幕尺寸不同，就把解析度加進 `vdd_settings.xml`（路徑可由登錄檔 `VDDPATH` 改變）、送 `RELOAD_DRIVER`，再用 `ChangeDisplaySettingsEx` 切換（不需系統管理員權限），然後重新連線。
 
 ### 4.3 觸控回傳實作（M5）
 
@@ -176,8 +209,8 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 
 ### 5.2 Windows 端：虛擬螢幕驅動
 
-- 不自己寫 IddCx 驅動。沿用 MIT 授權的開源 Virtual Display Driver，並透過它的控制介面新增螢幕、設定解析度與更新率。
-- 公開發布的驅動需要微軟簽章，所以直接使用上游已簽章的版本；`padbridge-host` 只負責偵測是否已安裝並引導使用者安裝。
+- 不自己寫 IddCx 驅動。沿用 MIT 授權的開源 Virtual Display Driver，並透過它的設定檔與 named pipe 新增螢幕、設定解析度（見 4.7）。
+- 驅動必須簽章，所以直接使用上游已簽章的版本：PadBridge 不散布驅動，只用 winget 取得上游的控制程式，由使用者在其中安裝。上游的安裝程序會把作者的 SignPath 憑證加入「受信任的發行者」。
 - 公司管理的電腦可能禁止安裝驅動。屆時退回「鏡像模式」：直接擷取既有螢幕，不新增螢幕。
 
 ### 5.3 觸控注入
@@ -190,13 +223,20 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 ```
 padbridge/
 ├─ LICENSE (MIT)
+├─ THIRD_PARTY_NOTICES.md     # 第三方授權與來源
+├─ licenses/                  # 第三方授權全文
 ├─ Cargo.toml                 # Rust workspace
 ├─ crates/
 │  ├─ protocol/               # 線路協定（無相依）
 │  ├─ usbmux/                 # usbmuxd 客戶端          (M1)
-│  ├─ host/                   # 共用：連線、探索、鏡像解碼
-│  ├─ cli/                    # 命令列：devices / watch / ping / mirror
-│  └─ app/                    # Windows 桌面 App（egui）
+│  ├─ host/                   # Windows 端邏輯
+│  │   ├─ capture / display / hwenc   # 擷取、軟硬體編碼（Display）
+│  │   ├─ mirror / hwdec              # 軟硬體解碼（Mirror）
+│  │   ├─ gpu                         # GPU 列表與裝置
+│  │   ├─ vdisplay / vdd              # 虛擬螢幕偵測與 VDD 整合
+│  │   └─ input / discovery / target  # 觸控注入、探索、連線
+│  ├─ cli/                    # 命令列 padbridge-cli
+│  └─ app/                    # Windows 桌面 App PadBridge.exe（egui）
 ├─ ios/                       # Swift / XcodeGen       (M2+)
 │  ├─ project.yml
 │  ├─ App/
@@ -216,6 +256,8 @@ padbridge/
 | **M4** | Display：VDD + 擷取 + 編碼 → iPad 顯示 | iPad 出現在 Windows 顯示設定中 |
 | **M5** | 觸控 / Pencil 回傳 + 壓力感應 | 小畫家 / Krita 可繪圖 |
 | **M6** | 系統匣 UI、自動重連、120 Hz、HEVC、參數調整 | — |
+
+M0–M5 皆已完成，並於 2026-11-03 在實機（iPad、Windows 11、USB 與 Wi‑Fi）驗證；另外完成硬體解碼、GPU 選擇與 VDD 整合。
 
 ## 8. 風險
 
