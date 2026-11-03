@@ -14,12 +14,18 @@ use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 use padbridge_protocol::{Codec, FrameDecoder, Message, Role, PROTOCOL_VERSION};
 
+#[cfg(windows)]
+use crate::hwdec::HardwareDecoder;
+use crate::GpuId;
+
 /// What a mirror session reports besides frames.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MirrorEvent {
     Connected { name: String },
     Stream { codec: Codec, width: u32, height: u32, fps: u16, bitrate_kbps: u32 },
     Log(String),
+    /// Which decoder is in use, e.g. after falling back from hardware.
+    Decoder(String),
     /// Once a second: what arrived from the iPad and how long decoding took,
     /// to tell a slow source or link from a slow viewer.
     Stats { received_fps: f64, mbps: f64, decode_ms: f64 },
@@ -34,6 +40,7 @@ pub enum MirrorEvent {
 pub fn run_mirror(
     mut stream: TcpStream,
     host_name: &str,
+    choice: DecoderChoice,
     mut on_frame: impl FnMut(Frame) -> bool + Send,
     mut on_event: impl FnMut(MirrorEvent),
 ) {
@@ -45,10 +52,14 @@ pub fn run_mirror(
     if let Err(e) = send(Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() }) {
         return on_event(MirrorEvent::Ended(format!("連線錯誤：{e}")));
     }
-    let mut decoder = match MirrorDecoder::new() {
+    let (mut decoder, fallback) = match MirrorDecoder::with_choice(choice) {
         Ok(d) => d,
         Err(e) => return on_event(MirrorEvent::Ended(format!("無法初始化解碼器：{e}"))),
     };
+    on_event(MirrorEvent::Decoder(match fallback {
+        Some(reason) => format!("{}（無法使用硬體解碼：{reason}）", decoder.name()),
+        None => decoder.name(),
+    }));
 
     // Reading runs on its own thread so a backlog is visible here: every frame
     // must be decoded (later ones reference it), but only the newest one in the
@@ -88,8 +99,8 @@ pub fn run_mirror(
         let (slot, stopped) = (&slot, &stopped);
         scope.spawn(move || {
             let on_frame = &mut on_frame;
-            while let Some(planes) = slot.take() {
-                if !on_frame(planes.to_frame()) {
+            while let Some(picture) = slot.take() {
+                if !on_frame(picture.into_frame()) {
                     stopped.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -147,7 +158,7 @@ fn decode_loop(
                 stats = Stats::default();
             }
             let started = Instant::now();
-            let result = decoder.handle_planes(&msg, newest);
+            let result = decoder.handle_picture(&msg, newest);
             stats.busy += started.elapsed();
             match &msg {
                 Message::Hello { name, .. } => on_event(MirrorEvent::Connected { name: name.clone() }),
@@ -163,7 +174,7 @@ fn decode_loop(
                 _ => {}
             }
             match result {
-                Ok(Some(planes)) => slot.put(planes),
+                Ok(Some(picture)) => slot.put(picture),
                 Ok(None) => {}
                 Err(e @ MirrorError::UnsupportedCodec(_)) => return e.to_string(),
                 Err(e) => {
@@ -182,13 +193,13 @@ fn decode_loop(
 #[derive(Default)]
 struct Slot {
     /// The pending picture, and whether the decoder has finished.
-    state: Mutex<(Option<DecodedPlanes>, bool)>,
+    state: Mutex<(Option<Picture>, bool)>,
     changed: Condvar,
 }
 
 impl Slot {
-    fn put(&self, planes: DecodedPlanes) {
-        self.state.lock().unwrap().0 = Some(planes);
+    fn put(&self, picture: Picture) {
+        self.state.lock().unwrap().0 = Some(picture);
         self.changed.notify_one();
     }
 
@@ -198,11 +209,11 @@ impl Slot {
     }
 
     /// Waits for the next picture; `None` once closed.
-    fn take(&self) -> Option<DecodedPlanes> {
+    fn take(&self) -> Option<Picture> {
         let mut state = self.state.lock().unwrap();
         loop {
-            if let Some(planes) = state.0.take() {
-                return Some(planes);
+            if let Some(picture) = state.0.take() {
+                return Some(picture);
             }
             if state.1 {
                 return None;
@@ -241,6 +252,7 @@ pub enum MirrorError {
     UnsupportedCodec(Codec),
     BadAvcc,
     Decode(openh264::Error),
+    Hardware(String),
 }
 
 impl fmt::Display for MirrorError {
@@ -249,14 +261,33 @@ impl fmt::Display for MirrorError {
             MirrorError::UnsupportedCodec(c) => write!(f, "codec {c:?} is not supported by this viewer yet"),
             MirrorError::BadAvcc => write!(f, "malformed AVCC data"),
             MirrorError::Decode(e) => write!(f, "H.264 decode error: {e}"),
+            MirrorError::Hardware(e) => write!(f, "hardware decode error: {e}"),
         }
     }
 }
 
 impl std::error::Error for MirrorError {}
 
+/// Which decoder Mirror uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecoderChoice {
+    /// Hardware on the discrete GPU if possible, otherwise software.
+    #[default]
+    Auto,
+    /// OpenH264 on the CPU.
+    Software,
+    /// Hardware on this GPU (falls back to software if it can't).
+    Hardware(GpuId),
+}
+
+enum Backend {
+    Software(Decoder),
+    #[cfg(windows)]
+    Hardware(Box<HardwareDecoder>),
+}
+
 pub struct MirrorDecoder {
-    decoder: Decoder,
+    backend: Backend,
     /// SPS/PPS as Annex-B, fed ahead of every keyframe.
     params: Vec<u8>,
     /// Drop delta frames until a keyframe arrives (after start or an error).
@@ -264,12 +295,42 @@ pub struct MirrorDecoder {
 }
 
 impl MirrorDecoder {
+    /// Software (OpenH264) decoder.
     pub fn new() -> Result<Self, MirrorError> {
-        Ok(Self {
-            decoder: Decoder::new().map_err(MirrorError::Decode)?,
-            params: Vec::new(),
-            waiting_for_keyframe: true,
-        })
+        Ok(Self::with_backend(Backend::Software(Decoder::new().map_err(MirrorError::Decode)?)))
+    }
+
+    /// The decoder for `choice`, plus why hardware was given up on, if it was.
+    pub fn with_choice(choice: DecoderChoice) -> Result<(Self, Option<String>), MirrorError> {
+        #[cfg(windows)]
+        {
+            let gpu = match choice {
+                DecoderChoice::Software => None,
+                DecoderChoice::Auto => Some(None),
+                DecoderChoice::Hardware(id) => Some(Some(id)),
+            };
+            if let Some(gpu) = gpu {
+                match HardwareDecoder::new(gpu) {
+                    Ok(hw) => return Ok((Self::with_backend(Backend::Hardware(Box::new(hw))), None)),
+                    Err(e) => return Ok((Self::new()?, Some(e.to_string()))),
+                }
+            }
+        }
+        let _ = choice;
+        Ok((Self::new()?, None))
+    }
+
+    fn with_backend(backend: Backend) -> Self {
+        Self { backend, params: Vec::new(), waiting_for_keyframe: true }
+    }
+
+    /// e.g. "OpenH264（CPU）" or the hardware decoder and its GPU.
+    pub fn name(&self) -> String {
+        match &self.backend {
+            Backend::Software(_) => "軟體 OpenH264（CPU）".into(),
+            #[cfg(windows)]
+            Backend::Hardware(hw) => format!("硬體 {}", hw.name()),
+        }
     }
 
     /// Feeds one message. Returns a frame when one was decoded. After an
@@ -281,12 +342,12 @@ impl MirrorDecoder {
     /// Like [`handle`](Self::handle), but with `want_image` false a video
     /// frame is only decoded (to keep the reference chain), not converted.
     pub fn handle_frame(&mut self, msg: &Message, want_image: bool) -> Result<Option<Frame>, MirrorError> {
-        Ok(self.handle_planes(msg, want_image)?.map(|planes| planes.to_frame()))
+        Ok(self.handle_picture(msg, want_image)?.map(Picture::into_frame))
     }
 
-    /// Like [`handle_frame`](Self::handle_frame), but returns the decoded
-    /// planes so the RGB conversion can run on another thread.
-    pub fn handle_planes(&mut self, msg: &Message, want_image: bool) -> Result<Option<DecodedPlanes>, MirrorError> {
+    /// Like [`handle_frame`](Self::handle_frame), but a software-decoded
+    /// picture is left as YUV so the RGB conversion can run on another thread.
+    pub fn handle_picture(&mut self, msg: &Message, want_image: bool) -> Result<Option<Picture>, MirrorError> {
         match msg {
             Message::StreamConfig { codec, .. } | Message::CodecParams { codec, .. } if *codec != Codec::H264 => {
                 Err(MirrorError::UnsupportedCodec(*codec))
@@ -314,22 +375,48 @@ impl MirrorDecoder {
         rotation: u8,
         data: &[u8],
         want_image: bool,
-    ) -> Result<Option<DecodedPlanes>, MirrorError> {
+    ) -> Result<Option<Picture>, MirrorError> {
         let mut packet = if keyframe { self.params.clone() } else { Vec::new() };
         packet.extend(avcc_to_annex_b(data).ok_or(MirrorError::BadAvcc)?);
-        let Some(yuv) = self.decoder.decode(&packet).map_err(MirrorError::Decode)? else { return Ok(None) };
-        if !want_image {
-            return Ok(None);
+        match &mut self.backend {
+            Backend::Software(decoder) => {
+                let Some(yuv) = decoder.decode(&packet).map_err(MirrorError::Decode)? else { return Ok(None) };
+                if !want_image {
+                    return Ok(None);
+                }
+                Ok(Some(Picture::Yuv(DecodedPlanes {
+                    size: yuv.dimensions(),
+                    strides: yuv.strides(),
+                    y: yuv.y().to_vec(),
+                    u: yuv.u().to_vec(),
+                    v: yuv.v().to_vec(),
+                    rotation,
+                    pts_us,
+                })))
+            }
+            #[cfg(windows)]
+            Backend::Hardware(hw) => {
+                let frame = hw.decode(&packet, rotation, want_image).map_err(|e| MirrorError::Hardware(e.to_string()))?;
+                Ok(frame.map(|frame| Picture::Rgb(Frame { pts_us, ..frame })))
+            }
         }
-        Ok(Some(DecodedPlanes {
-            size: yuv.dimensions(),
-            strides: yuv.strides(),
-            y: yuv.y().to_vec(),
-            u: yuv.u().to_vec(),
-            v: yuv.v().to_vec(),
-            rotation,
-            pts_us,
-        }))
+    }
+}
+
+/// A decoded picture on its way to the screen.
+pub enum Picture {
+    /// Software decoder output, still to be converted.
+    Yuv(DecodedPlanes),
+    /// Hardware decoder output, already converted and upright.
+    Rgb(Frame),
+}
+
+impl Picture {
+    pub fn into_frame(self) -> Frame {
+        match self {
+            Picture::Yuv(planes) => planes.to_frame(),
+            Picture::Rgb(frame) => frame,
+        }
     }
 }
 

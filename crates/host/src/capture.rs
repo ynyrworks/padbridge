@@ -4,12 +4,10 @@
 //! Display Driver, which is how the iPad becomes an extended display.
 
 use windows::core::Interface;
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::{
@@ -18,6 +16,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
+use crate::gpu::{create_device, GpuId};
 use crate::{vdisplay, BoxError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +27,8 @@ pub struct Monitor {
     pub device_name: String,
     /// Graphics adapter, e.g. the GPU or "Virtual Display Driver".
     pub adapter: String,
+    /// The GPU that renders this monitor (and so captures it).
+    pub gpu: GpuId,
     /// Top-left corner on the virtual desktop, in physical pixels.
     pub left: i32,
     pub top: i32,
@@ -87,7 +88,9 @@ fn outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput1, Monitor)>, BoxError> {
                 Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
                 Err(e) => return Err(e.into()),
             };
-            let adapter_name = utf16(&adapter.GetDesc1()?.Description);
+            let adapter_desc = adapter.GetDesc1()?;
+            let adapter_name = utf16(&adapter_desc.Description);
+            let gpu = GpuId::from_luid(adapter_desc.AdapterLuid);
             for o in 0.. {
                 let output = match adapter.EnumOutputs(o) {
                     Ok(output) => output,
@@ -105,6 +108,7 @@ fn outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput1, Monitor)>, BoxError> {
                     virtual_adapter: virtual_adapter(&device_name),
                     device_name,
                     adapter: adapter_name.clone(),
+                    gpu,
                     left: r.left,
                     top: r.top,
                     width: (r.right - r.left) as u32,
@@ -313,25 +317,6 @@ impl Capturer {
         self.height = height;
         Ok(changes)
     }
-}
-
-fn create_device(adapter: &IDXGIAdapter1, flags: D3D11_CREATE_DEVICE_FLAG) -> Result<(ID3D11Device, ID3D11DeviceContext), BoxError> {
-    let mut device = None;
-    let mut context = None;
-    unsafe {
-        D3D11CreateDevice(
-            adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            HMODULE::default(),
-            flags,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )?;
-    }
-    Ok((device.ok_or("D3D11 device was not created")?, context.ok_or("D3D11 context was not created")?))
 }
 
 #[cfg(test)]

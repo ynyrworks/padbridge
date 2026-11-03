@@ -18,7 +18,9 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
     D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
+use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::{
     eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base, eAVEncH264VProfile_ConstrainedBase, ICodecAPI,
     IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFSample, IMFTransform, MFCreateDXGIDeviceManager,
@@ -26,7 +28,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
     CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, METransformHaveOutput,
-    METransformNeedInput, MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+    METransformNeedInput, MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
     MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
@@ -39,7 +41,7 @@ use windows::Win32::System::Variant::VARIANT;
 
 use crate::display::{split_access_unit, DisplaySettings};
 use crate::mirror::annex_b_to_avcc;
-use crate::BoxError;
+use crate::{BoxError, GpuId};
 
 /// NV12 textures handed to the encoder in rotation, so a frame still being
 /// read by the asynchronous encoder is never overwritten.
@@ -72,11 +74,7 @@ impl HardwareEncoder {
     /// Sets up GPU scaling from `in_size` and a hardware H.264 encoder on
     /// `device` (which must have video support and multithread protection).
     pub fn new(device: &ID3D11Device, in_size: (usize, usize), settings: DisplaySettings) -> Result<Self, BoxError> {
-        static MF: Once = Once::new();
-        MF.call_once(|| unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let _ = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-        });
+        start_media_foundation();
         let out_size = output_size(in_size, settings.max_width);
         unsafe {
             let video_device: ID3D11VideoDevice = device.cast()?;
@@ -107,7 +105,7 @@ impl HardwareEncoder {
                 targets.push((texture, view.ok_or("no output view")?));
             }
 
-            let (transform, name) = activate_encoder()?;
+            let (transform, name) = activate_encoder(adapter_luid(device))?;
             let attributes = transform.GetAttributes()?;
             attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
             let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
@@ -381,8 +379,40 @@ unsafe fn create_nv12(device: &ID3D11Device, (w, h): (usize, usize)) -> Result<I
     Ok(texture.ok_or("NV12 texture was not created")?)
 }
 
-/// Finds and activates the first hardware H.264 encoder (NV12 in).
-unsafe fn activate_encoder() -> Result<(IMFTransform, String), BoxError> {
+pub(crate) fn start_media_foundation() {
+    static MF: Once = Once::new();
+    MF.call_once(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    });
+}
+
+/// The GPU a D3D11 device runs on.
+pub(crate) fn adapter_luid(device: &ID3D11Device) -> Option<GpuId> {
+    unsafe {
+        let dxgi: IDXGIDevice = device.cast().ok()?;
+        Some(GpuId::from_luid(dxgi.GetAdapter().ok()?.GetDesc().ok()?.AdapterLuid))
+    }
+}
+
+/// The GPU a hardware MFT belongs to, when it says.
+pub(crate) unsafe fn activate_luid(activate: &IMFActivate) -> Option<GpuId> {
+    if let Ok(value) = activate.GetUINT64(&MFT_ENUM_ADAPTER_LUID) {
+        return Some(GpuId(value));
+    }
+    let mut luid = [0u8; 8];
+    let mut size = 0;
+    activate.GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut luid, Some(&mut size)).ok()?;
+    (size == 8).then(|| {
+        let low = u32::from_le_bytes([luid[0], luid[1], luid[2], luid[3]]);
+        let high = i32::from_le_bytes([luid[4], luid[5], luid[6], luid[7]]);
+        GpuId::from_luid(LUID { LowPart: low, HighPart: high })
+    })
+}
+
+/// Finds and activates a hardware H.264 encoder (NV12 in), preferring the
+/// one on `gpu` — with an integrated and a discrete GPU, each has its own.
+unsafe fn activate_encoder(gpu: Option<GpuId>) -> Result<(IMFTransform, String), BoxError> {
     let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
     let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
@@ -395,9 +425,11 @@ unsafe fn activate_encoder() -> Result<(IMFTransform, String), BoxError> {
         &mut activates,
         &mut count,
     )?;
-    let list: Vec<Option<IMFActivate>> =
+    let mut list: Vec<Option<IMFActivate>> =
         (0..count as usize).map(|i| std::ptr::read(activates.add(i))).collect();
     CoTaskMemFree(Some(activates as *const _));
+    // Same GPU first; encoders that don't say which GPU they belong to stay in order.
+    list.sort_by_key(|a| a.as_ref().and_then(|a| activate_luid(a)).is_some_and(|luid| Some(luid) != gpu));
     let mut last_error: BoxError = "找不到硬體 H.264 編碼器".into();
     for activate in list.into_iter().flatten() {
         let name = friendly_name(&activate).unwrap_or_else(|| "Hardware H.264 encoder".into());
@@ -409,7 +441,7 @@ unsafe fn activate_encoder() -> Result<(IMFTransform, String), BoxError> {
     Err(last_error)
 }
 
-unsafe fn friendly_name(activate: &IMFActivate) -> Option<String> {
+pub(crate) unsafe fn friendly_name(activate: &IMFActivate) -> Option<String> {
     let mut text = windows::core::PWSTR::null();
     let mut length = 0;
     activate.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut text, &mut length).ok()?;

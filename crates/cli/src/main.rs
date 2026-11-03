@@ -9,7 +9,8 @@ use std::sync::atomic::AtomicBool;
 
 use padbridge_host::capture::list_monitors;
 use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings};
-use padbridge_host::mirror::{run_mirror, Frame, MirrorEvent};
+use padbridge_host::gpu::list_gpus;
+use padbridge_host::mirror::{run_mirror, DecoderChoice, Frame, MirrorEvent};
 use padbridge_host::target::{connect, describe_device, resolve_target};
 use padbridge_host::{host_name, ping_session, BoxError, Event};
 use padbridge_protocol::{DISPLAY_PORT, MIRROR_PORT};
@@ -22,6 +23,7 @@ const USAGE: &str = "\
   padbridge-cli ping <目標> [次數]          握手並量測 RTT（預設埠 47800）
   padbridge-cli mirror <目標>               在視窗中顯示 iPad 畫面（預設埠 47801）
   padbridge-cli monitors                    列出可傳送到 iPad 的螢幕
+  padbridge-cli gpus                        列出可用來編碼 / 解碼的 GPU
   padbridge-cli display <目標> [螢幕編號]   把 Windows 螢幕顯示在 iPad 上（預設埠 47800）
 
 <目標>：
@@ -46,6 +48,7 @@ fn main() -> ExitCode {
         },
         ["mirror", target] => mirror(target),
         ["monitors"] => monitors(),
+        ["gpus"] => gpus(),
         ["display", target] => display(target, 0),
         ["display", target, monitor] => match monitor.parse() {
             Ok(n) => display(target, n),
@@ -144,6 +147,16 @@ fn monitors() -> CliResult {
     Ok(ExitCode::SUCCESS)
 }
 
+fn gpus() -> CliResult {
+    let monitors = list_monitors()?;
+    for gpu in list_gpus() {
+        let shows: Vec<String> = monitors.iter().filter(|m| m.gpu == gpu.id).map(|m| m.index.to_string()).collect();
+        let shows = if shows.is_empty() { String::new() } else { format!("  螢幕 {}", shows.join(", ")) };
+        println!("{}  {} MB{shows}", gpu.label(), gpu.dedicated_mb);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn display(target: &str, monitor: usize) -> CliResult {
     let label = list_monitors()?
         .into_iter()
@@ -179,9 +192,11 @@ fn mirror(target: &str) -> CliResult {
         run_mirror(
             stream,
             &name,
+            DecoderChoice::Auto,
             |frame| !matches!(tx.try_send(frame), Err(TrySendError::Disconnected(_))),
             |event| match event {
                 MirrorEvent::Connected { name } => println!("已連上 {name}"),
+                MirrorEvent::Decoder(name) => println!("解碼器：{name}"),
                 MirrorEvent::Stream { codec, width, height, fps, bitrate_kbps } => {
                     println!("串流 {codec:?} {width}×{height} @{fps} fps, {bitrate_kbps} kbps")
                 }

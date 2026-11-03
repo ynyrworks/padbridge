@@ -5,6 +5,10 @@ pub mod capture;
 pub mod discovery;
 pub mod display;
 #[cfg(windows)]
+pub mod gpu;
+#[cfg(windows)]
+pub mod hwdec;
+#[cfg(windows)]
 pub mod hwenc;
 pub mod input;
 pub mod mirror;
@@ -18,6 +22,10 @@ pub mod vdisplay;
 pub use session::{ping_session, Event, Summary};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Identifies a GPU for this boot (its adapter LUID); see `gpu::list_gpus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuId(pub u64);
 
 /// Name this computer announces in `Hello`.
 pub fn host_name() -> String {

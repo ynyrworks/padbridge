@@ -97,6 +97,17 @@ fn header<T>(kind: DISPLAYCONFIG_DEVICE_INFO_TYPE, adapter: LUID, id: u32) -> DI
     DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: kind, size: size_of::<T>() as u32, adapterId: adapter, id }
 }
 
+/// Device instance id of the adapter with this LUID, e.g. `PCI\VEN_10DE&…` or
+/// `ROOT\DISPLAY\0000`; `None` if Windows doesn't know it.
+pub fn adapter_instance_id(luid: LUID) -> Option<String> {
+    let mut adapter = DISPLAYCONFIG_ADAPTER_NAME {
+        header: header::<DISPLAYCONFIG_ADAPTER_NAME>(DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME, luid, 0),
+        ..Default::default()
+    };
+    let status = unsafe { DisplayConfigGetDeviceInfo(&mut adapter.header) };
+    (status == 0).then(|| instance_id_from_path(&utf16(&adapter.adapterDevicePath)))
+}
+
 /// GDI device name (upper case, e.g. `\\.\DISPLAY3`) → instance id of the
 /// adapter that owns that source, for every active display.
 pub fn source_adapters() -> HashMap<String, String> {

@@ -11,8 +11,10 @@ use padbridge_host::capture::{list_monitors, Monitor};
 use padbridge_host::vdd;
 use padbridge_host::vdisplay::{virtual_adapters, VirtualAdapter};
 use padbridge_host::discovery::{Discovery, DiscoveryEvent, Endpoint};
-use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings};
-use padbridge_host::mirror::{run_mirror, Frame, MirrorEvent};
+use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings, EncoderChoice};
+use padbridge_host::gpu::{list_gpus, Gpu};
+use padbridge_host::mirror::{run_mirror, DecoderChoice, Frame, MirrorEvent};
+use padbridge_host::GpuId;
 use padbridge_host::target::{connect, resolve_target, Transport};
 use padbridge_host::{host_name, ping_session, Event};
 use padbridge_protocol::{Role, DISPLAY_PORT, MIRROR_PORT};
@@ -33,6 +35,9 @@ pub struct PadBridgeApp {
     virtual_adapters: Vec<VirtualAdapter>,
     monitor_index: usize,
     allow_input: bool,
+    gpus: Vec<Gpu>,
+    encoder_choice: EncoderChoice,
+    decoder_choice: DecoderChoice,
     /// A Virtual Display Driver install or enable is running.
     vdd_busy: Arc<AtomicBool>,
     /// Set by background work that changed the monitors.
@@ -119,6 +124,9 @@ impl PadBridgeApp {
             virtual_adapters: Vec::new(),
             monitor_index: 0,
             allow_input: true,
+            gpus: list_gpus(),
+            encoder_choice: EncoderChoice::Auto,
+            decoder_choice: DecoderChoice::Auto,
             vdd_busy: Arc::new(AtomicBool::new(false)),
             monitors_changed: Arc::new(AtomicBool::new(false)),
             log: VecDeque::new(),
@@ -202,6 +210,7 @@ impl PadBridgeApp {
         let worker_shared = shared.clone();
         let ctx = self.ctx.clone();
         let log = self.log_tx.clone();
+        let decoder = self.decoder_choice;
         thread::spawn(move || {
             let stream = match connect(&transport, port) {
                 Ok(s) => s,
@@ -225,6 +234,7 @@ impl PadBridgeApp {
             run_mirror(
                 stream,
                 &host_name(),
+                decoder,
                 move |frame| {
                     let image = to_color_image(&frame);
                     let mut s = frame_shared.lock().unwrap();
@@ -241,6 +251,9 @@ impl PadBridgeApp {
                         }
                         MirrorEvent::Log(text) => {
                             let _ = log.send(format!("[iPad] {text}"));
+                        }
+                        MirrorEvent::Decoder(name) => {
+                            let _ = log.send(format!("鏡像解碼：{name}"));
                         }
                         MirrorEvent::Stats { received_fps, mbps, decode_ms } => {
                             s.link_stats =
@@ -346,6 +359,10 @@ impl PadBridgeApp {
 
         ui.add_space(12.0);
         ui.separator();
+        self.codec_picker(ui);
+
+        ui.add_space(12.0);
+        ui.separator();
         ui.label(RichText::new("手動連線").strong());
         ui.add(egui::TextEdit::singleline(&mut self.manual_address).hint_text("iPad 的 IP 或 usb").desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
@@ -445,6 +462,61 @@ impl PadBridgeApp {
         }
     }
 
+    /// Which GPU (or the CPU) encodes for Display and decodes for Mirror.
+    fn codec_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("編碼 / 解碼").strong());
+        let gpu_label = |id: GpuId, gpus: &[Gpu]| {
+            gpus.iter().find(|g| g.id == id).map_or_else(|| "（已不存在的 GPU）".to_string(), Gpu::label)
+        };
+        let monitor_gpu = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.gpu);
+
+        let encoder_text = |choice: EncoderChoice, gpus: &[Gpu]| match choice {
+            EncoderChoice::Auto => "自動（螢幕所在的 GPU）".to_string(),
+            EncoderChoice::Software => "CPU（軟體）".to_string(),
+            EncoderChoice::Hardware(id) => {
+                let copy = if Some(id) != monitor_gpu { "・跨 GPU 複製" } else { "" };
+                format!("{}{copy}", gpu_label(id, gpus))
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.label("延伸螢幕編碼");
+            egui::ComboBox::from_id_salt("encoder")
+                .width(ui.available_width())
+                .selected_text(encoder_text(self.encoder_choice, &self.gpus))
+                .show_ui(ui, |ui| {
+                    let mut options = vec![EncoderChoice::Auto];
+                    options.extend(self.gpus.iter().map(|g| EncoderChoice::Hardware(g.id)));
+                    options.push(EncoderChoice::Software);
+                    for option in options {
+                        ui.selectable_value(&mut self.encoder_choice, option, encoder_text(option, &self.gpus));
+                    }
+                })
+                .response
+                .on_hover_text("螢幕由哪張顯示卡繪製，就用那張編碼最快；選另一張會多一次經過記憶體的複製。");
+        });
+
+        let decoder_text = |choice: DecoderChoice, gpus: &[Gpu]| match choice {
+            DecoderChoice::Auto => "自動（獨顯優先）".to_string(),
+            DecoderChoice::Software => "CPU（軟體）".to_string(),
+            DecoderChoice::Hardware(id) => gpu_label(id, gpus),
+        };
+        ui.horizontal(|ui| {
+            ui.label("鏡像解碼");
+            egui::ComboBox::from_id_salt("decoder")
+                .width(ui.available_width())
+                .selected_text(decoder_text(self.decoder_choice, &self.gpus))
+                .show_ui(ui, |ui| {
+                    let mut options = vec![DecoderChoice::Auto];
+                    options.extend(self.gpus.iter().map(|g| DecoderChoice::Hardware(g.id)));
+                    options.push(DecoderChoice::Software);
+                    for option in options {
+                        ui.selectable_value(&mut self.decoder_choice, option, decoder_text(option, &self.gpus));
+                    }
+                });
+        });
+        ui.label(RichText::new("下次開始延伸螢幕 / 鏡像時套用。").small().weak());
+    }
+
     /// Runs Virtual Display Driver work off the UI thread, logging progress.
     fn run_vdd_task(
         &self,
@@ -510,7 +582,12 @@ impl PadBridgeApp {
     /// from the iPad's is switched to the iPad's resolution and the session restarted.
     fn start_display_with(&mut self, title: String, transport: Transport, port: u16, allow_refit: bool) {
         self.stop_sessions();
-        let settings = DisplaySettings { monitor: self.monitor_index, allow_input: self.allow_input, ..DisplaySettings::default() };
+        let settings = DisplaySettings {
+            monitor: self.monitor_index,
+            allow_input: self.allow_input,
+            encoder: self.encoder_choice,
+            ..DisplaySettings::default()
+        };
         let selected = self.monitors.iter().find(|m| m.index == self.monitor_index);
         let monitor = selected.map(|m| m.label()).unwrap_or_default();
         let fit_target = selected

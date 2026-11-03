@@ -9,7 +9,7 @@ use openh264::OpenH264API;
 use padbridge_protocol::{Codec, Message};
 
 use crate::mirror::annex_b_to_avcc;
-use crate::BoxError;
+use crate::{BoxError, GpuId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplaySettings {
@@ -21,14 +21,34 @@ pub struct DisplaySettings {
     pub max_width: usize,
     /// Inject the iPad's touches, Pencil and trackpad input into Windows.
     pub allow_input: bool,
-    /// Prefer the GPU (scaling + hardware encoder); falls back to software automatically.
-    pub hardware: bool,
+    /// Which encoder to use; hardware falls back to software automatically.
+    pub encoder: EncoderChoice,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        Self { monitor: 0, max_fps: 60, bitrate_kbps: 10_000, max_width: 1920, allow_input: true, hardware: true }
+        Self {
+            monitor: 0,
+            max_fps: 60,
+            bitrate_kbps: 10_000,
+            max_width: 1920,
+            allow_input: true,
+            encoder: EncoderChoice::Auto,
+        }
     }
+}
+
+/// Which encoder Display uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EncoderChoice {
+    /// Hardware on the GPU that renders the monitor (no copies), else software.
+    #[default]
+    Auto,
+    /// OpenH264 on the CPU.
+    Software,
+    /// Hardware on this GPU. If the monitor is rendered by another GPU, each
+    /// frame is copied across through system memory.
+    Hardware(GpuId),
 }
 
 /// A desktop image as tightly packed BGRA.
@@ -221,9 +241,17 @@ mod session {
 
     use padbridge_protocol::{FrameDecoder, Message, Role, PROTOCOL_VERSION};
 
-    use super::{DisplaySettings, VideoPipeline};
-    use crate::capture::Capturer;
+    use windows::Win32::Graphics::Direct3D11::{
+        ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    use super::{DisplaySettings, EncoderChoice, VideoPipeline};
+    use crate::capture::{list_monitors, Capturer};
+    use crate::gpu::{open_video_device, Gpu};
     use crate::hwenc::HardwareEncoder;
+    use crate::GpuId;
     use crate::input::{Injector, InputMapper, ScreenRect};
 
     #[derive(Debug, Clone, PartialEq)]
@@ -238,23 +266,63 @@ mod session {
     }
 
     enum Encoder {
-        Hardware(Box<HardwareEncoder>),
+        /// With `Upload` when the encoder's GPU isn't the one rendering the monitor.
+        Hardware(Box<HardwareEncoder>, Option<Box<Upload>>),
         Software(Box<VideoPipeline>),
     }
 
     impl Encoder {
         fn name(&self) -> String {
             match self {
-                Encoder::Hardware(e) => format!("硬體：{}", e.name()),
+                Encoder::Hardware(e, None) => format!("硬體：{}", e.name()),
+                Encoder::Hardware(e, Some(upload)) => format!("硬體：{}（{}，跨 GPU 複製）", e.name(), upload.gpu.label()),
                 Encoder::Software(_) => "軟體：OpenH264".into(),
             }
         }
 
         fn force_keyframe(&mut self) {
             match self {
-                Encoder::Hardware(e) => e.force_keyframe(),
+                Encoder::Hardware(e, _) => e.force_keyframe(),
                 Encoder::Software(p) => p.force_keyframe(),
             }
+        }
+    }
+
+    /// Copies captured frames to another GPU's texture for its encoder.
+    struct Upload {
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        gpu: Gpu,
+        texture: Option<(ID3D11Texture2D, (usize, usize))>,
+    }
+
+    impl Upload {
+        fn new(device: ID3D11Device, gpu: Gpu) -> Result<Self, crate::BoxError> {
+            let context = unsafe { device.GetImmediateContext()? };
+            Ok(Self { device, context, gpu, texture: None })
+        }
+
+        fn write(&mut self, width: usize, height: usize, bgra: &[u8]) -> Result<&ID3D11Texture2D, crate::BoxError> {
+            if self.texture.as_ref().is_none_or(|(_, size)| *size != (width, height)) {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: width as u32,
+                    Height: height as u32,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let mut texture = None;
+                unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+                self.texture = Some((texture.ok_or("upload texture was not created")?, (width, height)));
+            }
+            let (texture, _) = self.texture.as_ref().unwrap();
+            unsafe { self.context.UpdateSubresource(texture, 0, None, bgra.as_ptr().cast(), (width * 4) as u32, 0) };
+            Ok(texture)
         }
     }
 
@@ -284,22 +352,40 @@ mod session {
         Err("擷取不到螢幕畫面".into())
     }
 
-    /// Hardware encoding when available, otherwise software with CPU readback.
+    /// Hardware encoding when chosen and available, otherwise software with CPU readback.
     fn open_encoder(
         settings: &DisplaySettings,
         on_event: &mut impl FnMut(DisplayEvent),
     ) -> Result<(Capturer, Encoder), crate::BoxError> {
-        if settings.hardware {
-            let mut capturer = Capturer::new(settings.monitor, false)?;
-            first_image(&mut capturer)?;
-            match HardwareEncoder::new(capturer.device(), capturer.size(), settings.clone()) {
-                Ok(encoder) => return Ok((capturer, Encoder::Hardware(Box::new(encoder)))),
+        let gpu = match settings.encoder {
+            EncoderChoice::Software => None,
+            EncoderChoice::Auto => Some(None),
+            EncoderChoice::Hardware(id) => Some(Some(id)),
+        };
+        if let Some(gpu) = gpu {
+            match open_hardware(settings, gpu) {
+                Ok(pair) => return Ok(pair),
                 Err(e) => on_event(DisplayEvent::Log(format!("無法使用硬體編碼，改用軟體編碼：{e}"))),
             }
         }
         let mut capturer = Capturer::new(settings.monitor, true)?;
         first_image(&mut capturer)?;
         Ok((capturer, Encoder::Software(Box::new(VideoPipeline::new(settings.clone())?))))
+    }
+
+    /// Hardware encoder on `gpu`, or on the GPU rendering the monitor when `None`.
+    fn open_hardware(settings: &DisplaySettings, gpu: Option<GpuId>) -> Result<(Capturer, Encoder), crate::BoxError> {
+        let monitor_gpu = list_monitors()?.get(settings.monitor).map(|m| m.gpu);
+        let cross_gpu = gpu.is_some_and(|g| Some(g) != monitor_gpu);
+        let mut capturer = Capturer::new(settings.monitor, cross_gpu)?;
+        first_image(&mut capturer)?;
+        if !cross_gpu {
+            let encoder = HardwareEncoder::new(capturer.device(), capturer.size(), settings.clone())?;
+            return Ok((capturer, Encoder::Hardware(Box::new(encoder), None)));
+        }
+        let (device, gpu) = open_video_device(gpu)?;
+        let encoder = HardwareEncoder::new(&device, capturer.size(), settings.clone())?;
+        Ok((capturer, Encoder::Hardware(Box::new(encoder), Some(Box::new(Upload::new(device, gpu)?)))))
     }
 
     fn stream_display(
@@ -375,12 +461,22 @@ mod session {
 
             let started = Instant::now();
             let (messages, size) = match &mut encoder {
-                Encoder::Hardware(hw) => {
+                Encoder::Hardware(hw, upload) => {
                     if hw.input_size() != capturer.size() {
                         // Resolution changed: rebuild the GPU pipeline for the new size.
-                        **hw = HardwareEncoder::new(capturer.device(), capturer.size(), settings.clone())?;
+                        let device = upload.as_ref().map_or(capturer.device(), |u| &u.device);
+                        **hw = HardwareEncoder::new(device, capturer.size(), settings.clone())?;
                     }
-                    let Some(texture) = capturer.texture() else { continue };
+                    let texture = match upload {
+                        Some(upload) => {
+                            let Some(image) = capturer.last_frame() else { continue };
+                            upload.write(image.width, image.height, image.bgra)?
+                        }
+                        None => {
+                            let Some(texture) = capturer.texture() else { continue };
+                            texture
+                        }
+                    };
                     (hw.encode(texture)?, hw.output_size())
                 }
                 Encoder::Software(pipeline) => {
@@ -479,6 +575,32 @@ mod session {
             }
         }
         let _ = events.send(None);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The cross-GPU path: frames uploaded from system memory to a separate
+        /// device and encoded there. Needs a hardware encoder:
+        /// `cargo test --release -p padbridge-host upload_then_encode -- --ignored`
+        #[test]
+        #[ignore]
+        fn upload_then_encode() {
+            let (device, gpu) = open_video_device(None).unwrap();
+            let (w, h) = (640, 360);
+            let mut upload = Upload::new(device.clone(), gpu).unwrap();
+            let mut encoder = HardwareEncoder::new(&device, (w, h), DisplaySettings::default()).unwrap();
+            let mut keyframes = 0;
+            for shift in 0..10u8 {
+                let bgra: Vec<u8> = (0..w * h).flat_map(|i| [(i as u8).wrapping_add(shift), 90, 200, 255]).collect();
+                let texture = upload.write(w, h, &bgra).unwrap().clone();
+                for message in encoder.encode(&texture).unwrap() {
+                    keyframes += usize::from(matches!(message, Message::VideoFrame { keyframe: true, .. }));
+                }
+            }
+            assert!(keyframes >= 1, "no keyframe from uploaded frames");
+        }
     }
 }
 
@@ -585,6 +707,22 @@ mod tests {
 
     #[test]
     fn run_mirror_delivers_frames_and_ends() {
+        mirror_session(crate::mirror::DecoderChoice::Software);
+    }
+
+    /// Needs a GPU with H.264 decoding:
+    /// `cargo test --release -p padbridge-host run_mirror_hardware -- --ignored`
+    #[test]
+    #[ignore]
+    fn run_mirror_hardware() {
+        let events = mirror_session(crate::mirror::DecoderChoice::Auto);
+        assert!(
+            events.iter().any(|e| matches!(e, crate::mirror::MirrorEvent::Decoder(name) if name.starts_with("硬體"))),
+            "fell back to software: {events:?}"
+        );
+    }
+
+    fn mirror_session(choice: crate::mirror::DecoderChoice) -> Vec<crate::mirror::MirrorEvent> {
         use crate::mirror::{run_mirror, MirrorEvent};
         use padbridge_protocol::{Role, PROTOCOL_VERSION};
         use std::io::Write;
@@ -608,6 +746,9 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
             socket.write_all(&Message::Bye.to_frame().unwrap()).unwrap();
+            // Closing with the host's Hello unread would reset the connection on Windows.
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
+            let _ = std::io::copy(&mut socket, &mut std::io::sink());
         });
 
         let stream = TcpStream::connect(addr).unwrap();
@@ -616,6 +757,7 @@ mod tests {
         run_mirror(
             stream,
             "test host",
+            choice,
             |frame| {
                 assert_eq!((frame.width, frame.height), (320, 200));
                 shown.fetch_add(1, Ordering::Relaxed);
@@ -624,9 +766,10 @@ mod tests {
             |event| events.push(event),
         );
         ipad.join().unwrap();
-        assert!(shown.load(Ordering::Relaxed) >= 1, "no frame shown");
+        assert!(shown.load(Ordering::Relaxed) >= 1, "no frame shown: {events:?}");
         assert!(events.contains(&MirrorEvent::Connected { name: "test iPad".into() }));
         assert_eq!(events.last(), Some(&MirrorEvent::Ended("iPad 結束廣播".into())));
+        events
     }
 
     #[test]
