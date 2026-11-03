@@ -15,6 +15,8 @@ use windows::Win32::Graphics::Dxgi::{
 pub use crate::GpuId;
 use crate::{vdisplay, BoxError};
 
+const MICROSOFT_VENDOR_ID: u32 = 0x1414;
+
 impl GpuId {
     pub fn from_luid(luid: LUID) -> Self {
         Self((u64::from(luid.HighPart as u32) << 32) | u64::from(luid.LowPart))
@@ -56,8 +58,10 @@ fn adapters() -> Result<Vec<(IDXGIAdapter1, Gpu)>, BoxError> {
                 Err(e) => return Err(e.into()),
             };
             let desc = adapter.GetDesc1()?;
-            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
-                continue; // Microsoft Basic Render Driver
+            // Microsoft Basic Render / Display Driver: flagged as software on most
+            // machines, but not on every VM, so also skip Microsoft's vendor id.
+            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 || desc.VendorId == MICROSOFT_VENDOR_ID {
+                continue;
             }
             // Indirect display drivers show up as extra adapters named after the GPU
             // that renders for them; they can't encode or decode themselves.
