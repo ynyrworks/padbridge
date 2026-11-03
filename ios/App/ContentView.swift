@@ -6,6 +6,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var display: DisplayService
+    @State private var broadcast = BroadcastPickerController()
 
     var body: some View {
         ZStack {
@@ -20,15 +21,20 @@ struct ContentView: View {
                         Text("在 Windows 的 PadBridge 按「延伸螢幕」，畫面就會全螢幕顯示在這裡。")
                     }
                     Section {
-                        HStack {
-                            Text("開始 / 停止廣播")
-                            Spacer()
-                            BroadcastPicker().frame(width: 44, height: 44)
+                        // The system picker's own button is a small icon; the whole row opens it.
+                        Button {
+                            broadcast.present()
+                        } label: {
+                            HStack {
+                                Label("開始 / 停止廣播", systemImage: "record.circle")
+                                Spacer()
+                                BroadcastPicker(picker: broadcast.picker).frame(width: 44, height: 44)
+                            }
                         }
                     } header: {
                         Text("Mirror 模式（iPad → Windows）")
                     } footer: {
-                        Text("廣播開始後，Windows 端連線至埠 47801。")
+                        Text("選「PadBridge Mirror」並開始廣播，再到 Windows 按「📺 鏡像」。也可以從控制中心長按螢幕錄影按鈕開始。")
                     }
                     Section("事件") {
                         ForEach(display.log) { line in
@@ -235,14 +241,28 @@ struct VideoLayerView: UIViewRepresentable {
     }
 }
 
-/// System broadcast picker preselecting our upload extension.
-struct BroadcastPicker: UIViewRepresentable {
-    func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
-        let picker = RPSystemBroadcastPickerView()
+/// Owns the system broadcast picker (preselecting our upload extension) so it
+/// can be opened from a larger control than its own icon.
+final class BroadcastPickerController {
+    let picker: RPSystemBroadcastPickerView = {
+        let picker = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 44, height: 44))
         picker.preferredExtension = Bundle.main.bundleIdentifier.map { "\($0).broadcast" }
         picker.showsMicrophoneButton = false
         return picker
+    }()
+
+    /// ReplayKit has no API to open the sheet; tapping the picker's inner button is the usual workaround.
+    func present() {
+        for case let button as UIButton in picker.subviews {
+            button.sendActions(for: .touchUpInside)
+        }
     }
+}
+
+struct BroadcastPicker: UIViewRepresentable {
+    let picker: RPSystemBroadcastPickerView
+
+    func makeUIView(context: Context) -> RPSystemBroadcastPickerView { picker }
 
     func updateUIView(_ uiView: RPSystemBroadcastPickerView, context: Context) {}
 }

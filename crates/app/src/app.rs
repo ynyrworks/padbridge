@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
 use padbridge_host::capture::{list_monitors, Monitor};
+use padbridge_host::vdd;
+use padbridge_host::vdisplay::{virtual_adapters, VirtualAdapter};
 use padbridge_host::discovery::{Discovery, DiscoveryEvent, Endpoint};
 use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings};
 use padbridge_host::mirror::{run_mirror, Frame, MirrorEvent};
@@ -28,8 +30,13 @@ pub struct PadBridgeApp {
     mirror: Option<MirrorView>,
     display: Option<DisplayView>,
     monitors: Vec<Monitor>,
+    virtual_adapters: Vec<VirtualAdapter>,
     monitor_index: usize,
     allow_input: bool,
+    /// A Virtual Display Driver install or enable is running.
+    vdd_busy: Arc<AtomicBool>,
+    /// Set by background work that changed the monitors.
+    monitors_changed: Arc<AtomicBool>,
     log: VecDeque<String>,
     log_tx: Sender<String>,
     log_rx: Receiver<String>,
@@ -50,10 +57,14 @@ struct DisplayShared {
     streaming: Option<String>,
     stats: Option<String>,
     ended: Option<String>,
+    /// The virtual monitor was switched to the iPad's resolution; reconnect.
+    restart: bool,
 }
 
 struct DisplayView {
     title: String,
+    transport: Transport,
+    port: u16,
     shared: Arc<Mutex<DisplayShared>>,
     stop: Arc<AtomicBool>,
 }
@@ -104,8 +115,11 @@ impl PadBridgeApp {
             mirror: None,
             display: None,
             monitors: Vec::new(),
+            virtual_adapters: Vec::new(),
             monitor_index: 0,
             allow_input: true,
+            vdd_busy: Arc::new(AtomicBool::new(false)),
+            monitors_changed: Arc::new(AtomicBool::new(false)),
             log: VecDeque::new(),
             log_tx,
             log_rx,
@@ -168,6 +182,16 @@ impl PadBridgeApp {
         while let Ok(line) = self.log_rx.try_recv() {
             self.push_log(line);
         }
+        if self.monitors_changed.swap(false, Ordering::Relaxed) {
+            self.refresh_monitors();
+        }
+        let restart = self.display.as_ref().is_some_and(|view| std::mem::take(&mut view.shared.lock().unwrap().restart));
+        if restart {
+            if let Some(view) = self.display.take() {
+                self.refresh_monitors();
+                self.start_display_with(view.title, view.transport, view.port, false);
+            }
+        }
     }
 
     fn start_mirror(&mut self, title: String, transport: Transport, port: u16) {
@@ -181,7 +205,9 @@ impl PadBridgeApp {
             let stream = match connect(&transport, port) {
                 Ok(s) => s,
                 Err(e) => {
-                    worker_shared.lock().unwrap().ended = Some(format!("連線失敗：{e}"));
+                    let reason = format!("連線失敗：{e}");
+                    let _ = log.send(format!("鏡像結束：{reason}"));
+                    worker_shared.lock().unwrap().ended = Some(reason);
                     ctx.request_repaint();
                     return;
                 }
@@ -218,7 +244,10 @@ impl PadBridgeApp {
                         MirrorEvent::DecodeError(e) => {
                             let _ = log.send(format!("解碼錯誤，已要求關鍵幀：{e}"));
                         }
-                        MirrorEvent::Ended(reason) => s.ended = Some(reason),
+                        MirrorEvent::Ended(reason) => {
+                            let _ = log.send(format!("鏡像結束：{reason}"));
+                            s.ended = Some(reason);
+                        }
                     }
                     ctx.request_repaint();
                 },
@@ -361,24 +390,95 @@ impl PadBridgeApp {
             }
         });
         ui.checkbox(&mut self.allow_input, "允許 iPad 操作（觸控、Apple Pencil、觸控板）");
-        let virtual_display = self.monitors.iter().any(|m| !m.primary && m.adapter.to_lowercase().contains("virtual"));
-        if !virtual_display {
-            ui.label(
-                RichText::new("目前只會鏡像既有螢幕。要讓 iPad 成為「延伸」螢幕，請安裝虛擬顯示器驅動（例如 Virtual Display Driver），再按 🔄 並選它新增的螢幕。")
-                    .small()
-                    .weak(),
-            );
+        let selected_virtual =
+            self.monitors.iter().any(|m| m.index == self.monitor_index && m.virtual_adapter.is_some());
+        let any_virtual_monitor = self.monitors.iter().any(|m| m.virtual_adapter.is_some());
+        let vdd_installed = self.virtual_adapters.iter().any(vdd::is_vdd);
+        let hint = if selected_virtual {
+            None
+        } else if any_virtual_monitor {
+            Some("目前選的是實體螢幕，iPad 會鏡像它。清單中標「虛擬」的螢幕才是延伸桌面。".to_string())
+        } else if vdd_installed {
+            Some("Virtual Display Driver 已安裝，但目前沒有開啟虛擬螢幕。".to_string())
+        } else if !self.virtual_adapters.is_empty() {
+            let names: Vec<_> = self.virtual_adapters.iter().map(|a| a.name.as_str()).collect();
+            Some(format!(
+                "偵測到虛擬顯示卡：{}，但目前沒有開啟虛擬螢幕（要由它所屬的軟體開啟）。也可以改裝下面的開源驅動。",
+                names.join("、")
+            ))
+        } else {
+            Some("目前只會鏡像既有螢幕。要讓 iPad 成為「延伸」螢幕，需要一個虛擬螢幕。".to_string())
+        };
+        if let Some(hint) = hint {
+            ui.label(RichText::new(hint).small().weak());
+        }
+        if any_virtual_monitor {
+            return;
+        }
+        let busy = self.vdd_busy.load(Ordering::Relaxed);
+        if vdd_installed {
+            let button = ui.add_enabled(!busy, egui::Button::new("🖥 開啟虛擬螢幕"));
+            if button.clicked() {
+                self.run_vdd_task("開啟虛擬螢幕", |_| vdd::enable_monitor());
+            }
+        } else {
+            let button = ui
+                .add_enabled(!busy, egui::Button::new("⬇ 安裝虛擬螢幕（Virtual Display Driver）"))
+                .on_hover_text(
+                    "用 winget 下載開源的 Virtual Display Driver（MIT）控制程式並開啟它；\n\
+                     在控制程式按 Install Driver，Windows 會要求系統管理員權限。\n裝好後按 🔄。",
+                );
+            if button.clicked() {
+                self.run_vdd_task("安裝虛擬螢幕", |mut log| vdd::install(&mut log));
+            }
+        }
+        if busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("處理中…").small());
+            });
         }
     }
 
+    /// Runs Virtual Display Driver work off the UI thread, logging progress.
+    fn run_vdd_task(
+        &self,
+        what: &'static str,
+        task: impl FnOnce(&mut dyn FnMut(String)) -> Result<(), padbridge_host::BoxError> + Send + 'static,
+    ) {
+        let (busy, changed, log, ctx) =
+            (self.vdd_busy.clone(), self.monitors_changed.clone(), self.log_tx.clone(), self.ctx.clone());
+        busy.store(true, Ordering::Relaxed);
+        thread::spawn(move || {
+            let mut progress = |line: String| {
+                let _ = log.send(line);
+                ctx.request_repaint();
+            };
+            match task(&mut progress) {
+                Ok(()) => progress(format!("{what}：完成")),
+                Err(e) => progress(format!("{what}失敗：{e}")),
+            }
+            busy.store(false, Ordering::Relaxed);
+            changed.store(true, Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+    }
+
     fn refresh_monitors(&mut self) {
+        self.virtual_adapters = virtual_adapters();
         match list_monitors() {
             Ok(monitors) => {
-                // Prefer a virtual display if one exists, since that's the extended-desktop case.
-                if !monitors.iter().any(|m| m.index == self.monitor_index) || self.monitors.is_empty() {
+                // Prefer a virtual display if one exists, since that's the extended-desktop case;
+                // switch to one that just appeared unless a virtual one is already chosen.
+                let current = monitors.iter().find(|m| m.index == self.monitor_index);
+                let virtual_available = monitors.iter().any(|m| m.virtual_adapter.is_some());
+                if current.is_none()
+                    || self.monitors.is_empty()
+                    || (virtual_available && current.is_some_and(|m| m.virtual_adapter.is_none()))
+                {
                     self.monitor_index = monitors
                         .iter()
-                        .find(|m| m.adapter.to_lowercase().contains("virtual"))
+                        .find(|m| m.virtual_adapter.is_some())
                         .or_else(|| monitors.first())
                         .map_or(0, |m| m.index);
                 }
@@ -398,18 +498,33 @@ impl PadBridgeApp {
     }
 
     fn start_display(&mut self, title: String, transport: Transport, port: u16) {
+        self.start_display_with(title, transport, port, true);
+    }
+
+    /// With `allow_refit`, a Virtual Display Driver monitor whose size differs
+    /// from the iPad's is switched to the iPad's resolution and the session restarted.
+    fn start_display_with(&mut self, title: String, transport: Transport, port: u16, allow_refit: bool) {
         self.stop_sessions();
         let settings = DisplaySettings { monitor: self.monitor_index, allow_input: self.allow_input, ..DisplaySettings::default() };
-        let monitor = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.label()).unwrap_or_default();
+        let selected = self.monitors.iter().find(|m| m.index == self.monitor_index);
+        let monitor = selected.map(|m| m.label()).unwrap_or_default();
+        let fit_target = selected
+            .filter(|m| allow_refit && m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display Driver")))
+            .map(|m| (m.device_name.clone(), (m.width, m.height)));
         self.push_log(format!("延伸螢幕：{monitor} → {title}"));
         let shared = Arc::new(Mutex::new(DisplayShared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (worker_shared, worker_stop, ctx, log) = (shared.clone(), stop.clone(), self.ctx.clone(), self.log_tx.clone());
+        let worker_transport = transport.clone();
         thread::spawn(move || {
+            let transport = worker_transport;
+            let mut refit = None;
             let stream = match connect(&transport, port) {
                 Ok(s) => s,
                 Err(e) => {
-                    worker_shared.lock().unwrap().ended = Some(format!("連線失敗：{e}"));
+                    let reason = format!("連線失敗：{e}");
+                    let _ = log.send(format!("延伸螢幕結束：{reason}"));
+                    worker_shared.lock().unwrap().ended = Some(reason);
                     ctx.request_repaint();
                     return;
                 }
@@ -420,6 +535,12 @@ impl PadBridgeApp {
                     DisplayEvent::Connected { name } => s.peer_name = Some(name),
                     DisplayEvent::Screen { width_px, height_px, max_fps } => {
                         s.screen = Some(format!("iPad {width_px}×{height_px} · {max_fps} Hz"));
+                        if let Some((device, size)) = &fit_target {
+                            if *size != (width_px, height_px) {
+                                refit = Some((device.clone(), width_px, height_px));
+                                worker_stop.store(true, Ordering::Relaxed);
+                            }
+                        }
                     }
                     DisplayEvent::Streaming { monitor, width, height, encoder } => {
                         s.streaming = Some(format!("{monitor}\n傳送解析度 {width}×{height} · {encoder}"));
@@ -430,12 +551,29 @@ impl PadBridgeApp {
                     DisplayEvent::Log(text) => {
                         let _ = log.send(format!("[iPad] {text}"));
                     }
-                    DisplayEvent::Ended(reason) => s.ended = Some(reason),
+                    DisplayEvent::Ended(reason) if refit.is_none() => {
+                        let _ = log.send(format!("延伸螢幕結束：{reason}"));
+                        s.ended = Some(reason);
+                    }
+                    DisplayEvent::Ended(_) => {}
                 }
                 ctx.request_repaint();
             });
+            if let Some((device, width, height)) = refit {
+                let mut progress = |line: String| {
+                    let _ = log.send(line);
+                    ctx.request_repaint();
+                };
+                progress(format!("把虛擬螢幕調成 iPad 的解析度 {width}×{height}…"));
+                if let Err(e) = vdd::fit_monitor(&device, width, height, &mut progress) {
+                    progress(format!("無法調整虛擬螢幕解析度：{e}；以目前解析度繼續"));
+                }
+                // Reconnect either way; the restarted session doesn't try again.
+                worker_shared.lock().unwrap().restart = true;
+                ctx.request_repaint();
+            }
         });
-        self.display = Some(DisplayView { title, shared, stop });
+        self.display = Some(DisplayView { title, transport, port, shared, stop });
     }
 
     fn display_view(&mut self, ui: &mut egui::Ui) {

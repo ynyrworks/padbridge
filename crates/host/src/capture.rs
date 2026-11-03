@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
-use crate::BoxError;
+use crate::{vdisplay, BoxError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Monitor {
@@ -34,13 +34,19 @@ pub struct Monitor {
     pub width: u32,
     pub height: u32,
     pub primary: bool,
+    /// Set when a virtual display adapter owns this monitor, so it extends
+    /// the desktop rather than being a physical screen.
+    pub virtual_adapter: Option<String>,
 }
 
 impl Monitor {
     pub fn label(&self) -> String {
         let name = self.device_name.trim_start_matches(r"\\.\");
         let primary = if self.primary { " · 主螢幕" } else { "" };
-        format!("{name} · {}×{}{primary} · {}", self.width, self.height, self.adapter)
+        match &self.virtual_adapter {
+            Some(adapter) => format!("{name} · {}×{}{primary} · 虛擬 · {adapter}", self.width, self.height),
+            None => format!("{name} · {}×{}{primary} · {}", self.width, self.height, self.adapter),
+        }
     }
 }
 
@@ -62,6 +68,17 @@ fn ensure_dpi_aware() {
 fn outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput1, Monitor)>, BoxError> {
     ensure_dpi_aware();
     let mut found = Vec::new();
+    let owners = vdisplay::source_adapters();
+    let virtual_names: Vec<_> = vdisplay::virtual_adapters();
+    let virtual_adapter = |device_name: &str| {
+        let owner = owners.get(&device_name.to_ascii_uppercase())?;
+        vdisplay::is_virtual_instance(owner).then(|| {
+            virtual_names
+                .iter()
+                .find(|a| a.instance_id.eq_ignore_ascii_case(owner))
+                .map_or_else(|| owner.clone(), |a| a.name.clone())
+        })
+    };
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
         for a in 0.. {
@@ -82,9 +99,11 @@ fn outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput1, Monitor)>, BoxError> {
                     continue;
                 }
                 let r = desc.DesktopCoordinates;
+                let device_name = utf16(&desc.DeviceName);
                 let monitor = Monitor {
                     index: found.len(),
-                    device_name: utf16(&desc.DeviceName),
+                    virtual_adapter: virtual_adapter(&device_name),
+                    device_name,
                     adapter: adapter_name.clone(),
                     left: r.left,
                     top: r.top,

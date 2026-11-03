@@ -123,10 +123,24 @@ fn ping(target: &str, count: u32) -> CliResult {
 }
 
 fn monitors() -> CliResult {
-    for m in list_monitors()? {
+    let monitors = list_monitors()?;
+    for m in &monitors {
         println!("{}  {}  @({}, {})", m.index, m.label(), m.left, m.top);
     }
-    println!("\n要讓 iPad 當「延伸」螢幕，請先安裝虛擬顯示器驅動，再選它新增的螢幕。");
+    let adapters = padbridge_host::vdisplay::virtual_adapters();
+    if !adapters.is_empty() {
+        println!("\n已安裝的虛擬顯示卡：");
+        for a in &adapters {
+            println!("  {}  ({})", a.name, a.instance_id);
+        }
+    }
+    if monitors.iter().all(|m| m.virtual_adapter.is_none()) {
+        if adapters.is_empty() {
+            println!("\n要讓 iPad 當「延伸」螢幕，請先安裝虛擬顯示器驅動，再選它新增的螢幕。");
+        } else {
+            println!("\n虛擬顯示卡目前沒有開啟螢幕；由它所屬的軟體開啟後，再選它新增的螢幕。");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 

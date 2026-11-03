@@ -10,6 +10,10 @@ pub mod input;
 pub mod mirror;
 pub mod session;
 pub mod target;
+#[cfg(windows)]
+pub mod vdd;
+#[cfg(windows)]
+pub mod vdisplay;
 
 pub use session::{ping_session, Event, Summary};
 

@@ -6,3 +6,4 @@ ios/Generated/
 ios/PadBridgeKit/.build/
 ios/PadBridgeKit/.swiftpm/
 .DS_Store
+/dist

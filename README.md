@@ -77,7 +77,7 @@ cargo run --release -p padbridge-cli -- monitors
 cargo run --release -p padbridge-cli -- display usb 1
 ```
 
-**真正的「延伸」螢幕**需要虛擬顯示器驅動，例如開源的 [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)。裝好後 Windows 會多出一個螢幕，在 PadBridge 選它即可。沒裝的話，PadBridge 會鏡像你選的既有螢幕。
+**真正的「延伸」螢幕**需要虛擬顯示器驅動，例如開源的 [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)（MIT）。沒有虛擬螢幕時，PadBridge 會顯示「安裝虛擬螢幕」按鈕：它用 winget 下載 VDD 的控制程式並開啟，在控制程式按 Install Driver（需要系統管理員權限）即可。之後 PadBridge 會自動選這個虛擬螢幕，連上 iPad 時把它調成 iPad 的解析度。沒裝的話，PadBridge 會鏡像你選的既有螢幕。
 
 沒有 iPad 也能測試：
 
