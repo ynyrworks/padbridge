@@ -729,10 +729,17 @@ fn welcome(ui: &mut egui::Ui) {
 
 /// `0RGB` pixels from the decoder to an egui image.
 fn to_color_image(frame: &Frame) -> ColorImage {
-    let pixels = frame
-        .pixels
-        .iter()
-        .map(|&p| Color32::from_rgb((p >> 16) as u8, (p >> 8) as u8, p as u8))
-        .collect();
+    // A few million pixels per frame: split across threads to keep up with 60 fps.
+    let mut pixels = vec![Color32::BLACK; frame.pixels.len()];
+    let band = frame.pixels.len().div_ceil(4).max(1);
+    thread::scope(|scope| {
+        for (out, src) in pixels.chunks_mut(band).zip(frame.pixels.chunks(band)) {
+            scope.spawn(move || {
+                for (o, &p) in out.iter_mut().zip(src) {
+                    *o = Color32::from_rgb((p >> 16) as u8, (p >> 8) as u8, p as u8);
+                }
+            });
+        }
+    });
     ColorImage::new([frame.width, frame.height], pixels)
 }

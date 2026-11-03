@@ -156,7 +156,6 @@ pub struct MirrorDecoder {
     params: Vec<u8>,
     /// Drop delta frames until a keyframe arrives (after start or an error).
     waiting_for_keyframe: bool,
-    rgba: Vec<u8>,
 }
 
 impl MirrorDecoder {
@@ -165,7 +164,6 @@ impl MirrorDecoder {
             decoder: Decoder::new().map_err(MirrorError::Decode)?,
             params: Vec::new(),
             waiting_for_keyframe: true,
-            rgba: Vec::new(),
         })
     }
 
@@ -212,20 +210,58 @@ impl MirrorDecoder {
         if !want_image {
             return Ok(None);
         }
-
-        let (width, height) = yuv.dimensions();
-        self.rgba.resize(width * height * 4, 0);
-        yuv.write_rgba8(&mut self.rgba);
-        let pixels: Vec<u32> = self
-            .rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]))
-            .collect();
-        let (width, height, pixels) = rotate(width, height, pixels, rotation);
+        let (width, height, pixels) = yuv_to_xrgb_rotated(&yuv, rotation);
         Ok(Some(Frame { width, height, pixels, pts_us }))
     }
+}
+
+/// Converts I420 (BT.601, limited range) to upright `0RGB` in one pass,
+/// applying `quarter_turns` clockwise rotations, split across threads.
+/// Each output pixel reads its source position, so rotation costs nothing extra.
+pub fn yuv_to_xrgb_rotated(yuv: &impl YUVSource, quarter_turns: u8) -> (usize, usize, Vec<u32>) {
+    let (w, h) = yuv.dimensions();
+    let (y_stride, u_stride, v_stride) = yuv.strides();
+    let (y_plane, u_plane, v_plane) = (yuv.y(), yuv.u(), yuv.v());
+    let turns = quarter_turns & 3;
+    let (ow, oh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+    // Output (ox, oy) → source (sx, sy).
+    let source = move |ox: usize, oy: usize| match turns {
+        0 => (ox, oy),
+        1 => (oy, h - 1 - ox),
+        2 => (w - 1 - ox, h - 1 - oy),
+        _ => (w - 1 - oy, ox),
+    };
+    let convert = |sx: usize, sy: usize| {
+        let c = 298 * (i32::from(y_plane[sy * y_stride + sx]) - 16);
+        let d = i32::from(u_plane[(sy / 2) * u_stride + sx / 2]) - 128;
+        let e = i32::from(v_plane[(sy / 2) * v_stride + sx / 2]) - 128;
+        let r = ((c + 409 * e + 128) >> 8).clamp(0, 255) as u32;
+        let g = ((c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u32;
+        let b = ((c + 516 * d + 128) >> 8).clamp(0, 255) as u32;
+        r << 16 | g << 8 | b
+    };
+
+    let mut out = vec![0u32; ow * oh];
+    if ow == 0 || oh == 0 {
+        return (ow, oh, out);
+    }
+    let threads = thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+    let rows_per_band = oh.div_ceil(threads);
+    thread::scope(|scope| {
+        for (band, rows) in out.chunks_mut(rows_per_band * ow).enumerate() {
+            let (source, convert) = (&source, &convert);
+            scope.spawn(move || {
+                for (i, row) in rows.chunks_mut(ow).enumerate() {
+                    let oy = band * rows_per_band + i;
+                    for (ox, pixel) in row.iter_mut().enumerate() {
+                        let (sx, sy) = source(ox, oy);
+                        *pixel = convert(sx, sy);
+                    }
+                }
+            });
+        }
+    });
+    (ow, oh, out)
 }
 
 /// Converts 4-byte big-endian length prefixes to Annex-B start codes.

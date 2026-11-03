@@ -530,6 +530,95 @@ mod tests {
         println!("pipeline 1920x1080 (incl. test-frame generation): {:.1} ms", t.elapsed().as_secs_f64() * 100.0);
     }
 
+    /// Viewer side of Mirror at the iPad's broadcast size (1334×1920, sent rotated).
+    /// `cargo test --release -p padbridge-host bench_mirror_viewer -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_mirror_viewer() {
+        use crate::mirror::rotate;
+        let (w, h) = (1920, 1334);
+        let settings = DisplaySettings { max_width: w, ..DisplaySettings::default() };
+        let mut pipeline = VideoPipeline::new(settings).unwrap();
+        let mut messages = Vec::new();
+        for i in 0..30 {
+            messages.extend(pipeline.encode(&ScreenImage { width: w, height: h, bgra: &gradient(w, h, i * 3) }).unwrap());
+        }
+        let mut decoder = MirrorDecoder::new().unwrap();
+        let t = Instant::now();
+        let mut frames = 0;
+        for m in &messages {
+            frames += usize::from(decoder.handle_frame(m, false).unwrap().is_none() && matches!(m, Message::VideoFrame { .. }));
+        }
+        println!("decode only: {:.1} ms/frame", t.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+
+        let mut decoder = MirrorDecoder::new().unwrap();
+        let t = Instant::now();
+        let mut last = None;
+        for m in &messages {
+            last = decoder.handle_frame(m, true).unwrap().or(last);
+        }
+        println!("decode + convert: {:.1} ms/frame", t.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+
+        let frame = last.unwrap();
+        let t = Instant::now();
+        for _ in 0..10 {
+            rotate(frame.width, frame.height, frame.pixels.clone(), 1);
+        }
+        println!("separate rotate 90 (incl. clone): {:.1} ms", t.elapsed().as_secs_f64() * 100.0);
+
+        let mut packet = Vec::new();
+        for m in &messages[..3] {
+            if let Message::CodecParams { data, .. } | Message::VideoFrame { data, .. } = m {
+                packet.extend(crate::mirror::avcc_to_annex_b(data).unwrap());
+            }
+        }
+        let mut raw = openh264::decoder::Decoder::new().unwrap();
+        let yuv = raw.decode(&packet).unwrap().unwrap();
+        for turns in [0, 1] {
+            let t = Instant::now();
+            for _ in 0..10 {
+                crate::mirror::yuv_to_xrgb_rotated(&yuv, turns);
+            }
+            println!("fused convert, {turns} turns: {:.1} ms", t.elapsed().as_secs_f64() * 100.0);
+        }
+    }
+
+    #[test]
+    fn fused_conversion_matches_reference() {
+        use crate::mirror::{avcc_to_annex_b, rotate, yuv_to_xrgb_rotated};
+        use openh264::decoder::Decoder;
+        use openh264::formats::YUVSource;
+
+        let settings = DisplaySettings { max_width: 96, ..DisplaySettings::default() };
+        let mut pipeline = VideoPipeline::new(settings).unwrap();
+        let messages = pipeline.encode(&ScreenImage { width: 96, height: 64, bgra: &gradient(96, 64, 5) }).unwrap();
+        let mut packet = Vec::new();
+        for m in &messages {
+            match m {
+                Message::CodecParams { data, .. } | Message::VideoFrame { data, .. } => {
+                    packet.extend(avcc_to_annex_b(data).unwrap());
+                }
+                _ => {}
+            }
+        }
+        let mut decoder = Decoder::new().unwrap();
+        let yuv = decoder.decode(&packet).unwrap().expect("frame");
+        let (w, h) = yuv.dimensions();
+        let mut rgba = vec![0u8; w * h * 4];
+        yuv.write_rgba8(&mut rgba);
+        let xrgb: Vec<u32> =
+            rgba.as_chunks::<4>().0.iter().map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])).collect();
+        for turns in 0..4 {
+            let expected = rotate(w, h, xrgb.clone(), turns);
+            let got = yuv_to_xrgb_rotated(&yuv, turns);
+            assert_eq!((got.0, got.1), (expected.0, expected.1), "size, {turns} turns");
+            let worst = got.2.iter().zip(&expected.2).flat_map(|(a, b)| {
+                (0..3).map(move |c| ((a >> (c * 8)) & 255).abs_diff((b >> (c * 8)) & 255))
+            });
+            assert!(worst.max().unwrap() <= 3, "colors differ, {turns} turns");
+        }
+    }
+
     fn gray(values: &[u8]) -> Vec<u8> {
         values.iter().flat_map(|&v| [v, v, v, 255]).collect()
     }
