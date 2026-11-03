@@ -16,15 +16,18 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SPDRP_HARDWAREID, SP_DEVINFO_DATA,
 };
 use windows::Win32::Graphics::Gdi::{
-    ChangeDisplaySettingsExW, CDS_UPDATEREGISTRY, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
+    ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsW, CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY,
+    DEVMODEW, DEVMODEW_0, DEVMODEW_0_1, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISP_CHANGE_SUCCESSFUL,
+    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, ENUM_REGISTRY_SETTINGS,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_XVIRTUALSCREEN};
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig, DISPLAYCONFIG_ADAPTER_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
     DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows::Win32::Foundation::{ERROR_SUCCESS, LUID};
+use windows::Win32::Foundation::{ERROR_SUCCESS, LUID, POINTL};
 
 /// An installed display adapter with no hardware behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +182,79 @@ pub fn set_mode(device_name: &str, width: u32, height: u32) -> Result<(), String
     }
 }
 
+/// A display output (source) of an adapter, whether or not it is part of the desktop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterOutput {
+    /// GDI name, e.g. `\\.\DISPLAY3`.
+    pub device_name: String,
+    pub attached: bool,
+}
+
+/// The outputs of the adapters for which `matches(hardware id, name)` holds.
+pub fn adapter_outputs(matches: impl Fn(&str, &str) -> bool) -> Vec<AdapterOutput> {
+    let mut found = Vec::new();
+    for i in 0.. {
+        let mut device = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut device, 0) }.as_bool() {
+            break;
+        }
+        if matches(&utf16(&device.DeviceID), &utf16(&device.DeviceString)) {
+            found.push(AdapterOutput {
+                device_name: utf16(&device.DeviceName),
+                attached: device.StateFlags.contains(DISPLAY_DEVICE_ATTACHED_TO_DESKTOP),
+            });
+        }
+    }
+    found
+}
+
+/// Stages a change for one output and applies it, saving it for next time.
+fn change_output(device_name: &str, mode: &DEVMODEW) -> Result<(), String> {
+    let name: Vec<u16> = device_name.encode_utf16().chain([0]).collect();
+    let staged = unsafe {
+        ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(mode), None, CDS_UPDATEREGISTRY | CDS_NORESET, None)
+    };
+    if staged != DISP_CHANGE_SUCCESSFUL {
+        return Err(tr!("ChangeDisplaySettingsEx 回傳 {}", "ChangeDisplaySettingsEx returned {}", staged.0));
+    }
+    let applied = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
+    if applied == DISP_CHANGE_SUCCESSFUL {
+        Ok(())
+    } else {
+        Err(tr!("ChangeDisplaySettingsEx 回傳 {}", "ChangeDisplaySettingsEx returned {}", applied.0))
+    }
+}
+
+/// Takes an output off the desktop (like "Disconnect this display" in
+/// Settings); the monitor itself stays, ready for `attach`.
+pub fn detach(device_name: &str) -> Result<(), String> {
+    let mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        dmFields: DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT,
+        ..Default::default()
+    };
+    change_output(device_name, &mode)
+}
+
+/// Puts a detached output back on the desktop, right of the other monitors,
+/// at the size it last had.
+pub fn attach(device_name: &str) -> Result<(), String> {
+    let name: Vec<u16> = device_name.encode_utf16().chain([0]).collect();
+    let mut saved = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    let known = unsafe { EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_REGISTRY_SETTINGS, &mut saved) }.as_bool();
+    let (width, height) = if known && saved.dmPelsWidth > 0 { (saved.dmPelsWidth, saved.dmPelsHeight) } else { (1920, 1080) };
+    let right = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        dmFields: DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT,
+        dmPelsWidth: width,
+        dmPelsHeight: height,
+        ..Default::default()
+    };
+    mode.Anonymous1 = DEVMODEW_0 { Anonymous2: DEVMODEW_0_1 { dmPosition: POINTL { x: right, y: 0 }, ..Default::default() } };
+    change_output(device_name, &mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +282,11 @@ mod tests {
         let sources = source_adapters();
         assert!(adapters.iter().all(|a| is_virtual_instance(&a.instance_id)));
         assert!(sources.keys().all(|k| k.starts_with(r"\\.\DISPLAY")));
+        let outputs = adapter_outputs(|_, _| true);
+        assert!(outputs.iter().all(|o| o.device_name.starts_with(r"\\.\DISPLAY")));
+        // Every active display is one of the enumerated outputs, and attached.
+        for name in sources.keys() {
+            assert!(outputs.iter().any(|o| o.device_name.eq_ignore_ascii_case(name) && o.attached), "{name}");
+        }
     }
 }

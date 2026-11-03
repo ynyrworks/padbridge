@@ -197,7 +197,8 @@ record       = 長度 u32 LE · ChaCha20-Poly1305(key, nonce = 0u32 · counter u
 - `vdisplay`：用 `QueryDisplayConfig` 找出每個螢幕實際所屬的介面卡，裝置路徑在 `ROOT\` 或 `SWD\` 下就是虛擬螢幕；也用 SetupAPI 列出已安裝但沒有開螢幕的虛擬顯示卡。DXGI 會把間接顯示的輸出列在負責繪製的 GPU 底下，所以不能只看介面卡名稱。
 - `vdd`：整合 Virtual Display Driver（硬體 ID `Root\MttVDD`）。
   - 安裝：用 winget 安裝上游的控制程式（`VirtualDrivers.Virtual-Display-Driver`）並開啟，由使用者在其中安裝已簽章的驅動。
-  - 開啟螢幕：對 `\\.\pipe\MTTVirtualDisplayPipe` 送 `SETDISPLAYCOUNT 1`（UTF-16 訊息，任何使用者都能連）。
+  - 開啟螢幕：先把被 PadBridge 拆下的螢幕接回桌面（`ChangeDisplaySettingsEx` 指定位置與尺寸）；沒有的話對 `\\.\pipe\MTTVirtualDisplayPipe` 送 `SETDISPLAYCOUNT 1`（UTF-16 訊息，任何使用者都能連）。
+  - 關閉螢幕：驅動把螢幕數 0 當成 1，所以改用 `ChangeDisplaySettingsEx` 把它的輸出從桌面拆下（寬高 0，等同設定中的「中斷此顯示器連線」），不需系統管理員權限，也不必重新載入驅動。預設在 App 開啟時開、關閉時關（設定 `vdd_follows_app`）。
   - 配合 iPad 解析度：收到 `DisplayInfo` 後，若虛擬螢幕尺寸不同，就把解析度加進 `vdd_settings.xml`（路徑可由登錄檔 `VDDPATH` 改變）、送 `RELOAD_DRIVER`，再用 `ChangeDisplaySettingsEx` 切換（不需系統管理員權限），然後重新連線。
 
 ### 4.3 觸控回傳實作（M5）

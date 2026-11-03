@@ -231,6 +231,12 @@ impl PadBridgeApp {
         }
         app.refresh_monitors();
         app.apply_settings();
+        if app.settings.vdd_follows_app
+            && app.virtual_adapters.iter().any(vdd::is_vdd)
+            && !app.monitors.iter().any(|m| m.virtual_adapter.is_some())
+        {
+            app.run_vdd_task(tr!("開啟虛擬螢幕", "Turning on the virtual display"), |_| vdd::enable_monitor());
+        }
         // `PadBridge.exe --mirror <target>` / `--display <target>` start right away (handy for shortcuts).
         let args: Vec<String> = std::env::args().skip(1).collect();
         if let [flag, target] = args.as_slice() {
@@ -825,6 +831,16 @@ impl PadBridgeApp {
         if let Some(hint) = hint {
             ui.label(RichText::new(hint).small().weak());
         }
+        if vdd_installed {
+            ui.checkbox(
+                &mut self.settings.vdd_follows_app,
+                tr!("虛擬螢幕跟著 PadBridge 開關", "Turn the virtual display on and off with PadBridge"),
+            )
+            .on_hover_text(tr!(
+                "開啟 PadBridge 時開啟 Virtual Display Driver 的螢幕，關閉時把它從桌面移除，視窗會回到實體螢幕。",
+                "Turns on the Virtual Display Driver's display when PadBridge opens, and removes it from the desktop when PadBridge closes, so windows go back to the real screens."
+            ));
+        }
         if any_virtual_monitor {
             return;
         }
@@ -1261,6 +1277,11 @@ impl eframe::App for PadBridgeApp {
 
     fn on_exit(&mut self) {
         self.stop_sessions();
+        if self.settings.vdd_follows_app && vdd::installed().is_some() {
+            if let Err(e) = vdd::disable_monitor() {
+                eprintln!("{e}");
+            }
+        }
     }
 }
 

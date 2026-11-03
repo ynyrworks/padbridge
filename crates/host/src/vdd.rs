@@ -19,7 +19,7 @@ use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
 use crate::capture::list_monitors;
-use crate::vdisplay::{set_mode, virtual_adapters, VirtualAdapter};
+use crate::vdisplay::{adapter_outputs, attach, detach, set_mode, virtual_adapters, AdapterOutput, VirtualAdapter};
 use crate::BoxError;
 
 pub const WINGET_ID: &str = "VirtualDrivers.Virtual-Display-Driver";
@@ -120,17 +120,62 @@ pub fn fit_monitor(device_name: &str, width: u32, height: u32, log: &mut impl Fn
     Ok(())
 }
 
-/// Turns the driver's monitor on when it is installed but showing none.
-pub fn enable_monitor() -> Result<(), BoxError> {
-    send_command("SETDISPLAYCOUNT 1").map_err(|e| tr!("無法連到虛擬螢幕驅動：{e}", "Cannot reach the virtual display driver: {e}"))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if list_monitors()?.iter().any(|m| m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display"))) {
-            return Ok(());
+/// The driver's outputs, attached to the desktop or not.
+fn outputs() -> Vec<AdapterOutput> {
+    adapter_outputs(|hardware_id, name| {
+        hardware_id.eq_ignore_ascii_case(r"Root\MttVDD") || name.contains("Virtual Display Driver")
+    })
+}
+
+/// Whether the driver's monitor is part of the desktop.
+pub fn monitor_on() -> Result<bool, BoxError> {
+    Ok(list_monitors()?.iter().any(|m| m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display"))))
+}
+
+/// Waits for the monitor, putting it back on the desktop if Windows kept it off.
+fn wait_for_monitor(limit: Duration) -> Result<bool, BoxError> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if monitor_on()? {
+            return Ok(true);
+        }
+        // Outputs without a monitor refuse this; only a real one comes back.
+        for output in outputs().iter().filter(|o| !o.attached) {
+            let _ = attach(&output.device_name);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(500));
     }
-    Err(tr!("驅動沒有新增螢幕", "The driver did not add a display").into())
+}
+
+/// Turns the driver's monitor on when it is installed but showing none: puts
+/// back one that `disable_monitor` took off, or asks the driver for one.
+pub fn enable_monitor() -> Result<(), BoxError> {
+    if wait_for_monitor(Duration::from_secs(2))? {
+        return Ok(());
+    }
+    send_command("SETDISPLAYCOUNT 1").map_err(|e| tr!("無法連到虛擬螢幕驅動：{e}", "Cannot reach the virtual display driver: {e}"))?;
+    if wait_for_monitor(Duration::from_secs(10))? {
+        Ok(())
+    } else {
+        Err(tr!("驅動沒有新增螢幕", "The driver did not add a display").into())
+    }
+}
+
+/// Takes the driver's monitor off the desktop, so windows move back to the
+/// real screens. The driver keeps it, so `enable_monitor` brings it back
+/// without a reload. (The driver treats a count of 0 as 1, so asking it for
+/// no monitors would not work.) Returns how many were taken off.
+pub fn disable_monitor() -> Result<usize, BoxError> {
+    let mut count = 0;
+    for output in outputs().iter().filter(|o| o.attached) {
+        detach(&output.device_name)
+            .map_err(|e| tr!("無法關閉虛擬螢幕 {}：{e}", "Could not turn off the virtual display {}: {e}", output.device_name))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Installs the driver's control app with winget and opens it, where the

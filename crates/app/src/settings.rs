@@ -31,6 +31,8 @@ pub struct Settings {
     pub max_width: usize,
     pub bitrate_kbps: u32,
     pub max_fps: u32,
+    /// Turn the Virtual Display Driver's monitor on when the app opens and off when it closes.
+    pub vdd_follows_app: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             max_width: 1920,
             bitrate_kbps: 10_000,
             max_fps: 60,
+            vdd_follows_app: true,
         }
     }
 }
@@ -88,5 +91,6 @@ mod tests {
         let old: Settings = serde_json::from_str(r#"{"allow_input": false}"#).unwrap();
         assert!(!old.allow_input);
         assert_eq!(old.max_fps, 60);
+        assert!(old.vdd_follows_app);
     }
 }
