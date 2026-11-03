@@ -7,17 +7,21 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
 use padbridge_protocol::{Codec, FrameDecoder, Message, Role, PROTOCOL_VERSION};
 
 /// What a mirror session reports besides frames.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MirrorEvent {
     Connected { name: String },
     Stream { codec: Codec, width: u32, height: u32, fps: u16, bitrate_kbps: u32 },
     Log(String),
+    /// Once a second: what arrived from the iPad and how long decoding took,
+    /// to tell a slow source or link from a slow viewer.
+    Stats { received_fps: f64, mbps: f64, decode_ms: f64 },
     /// Recoverable: a keyframe has been requested.
     DecodeError(String),
     Ended(String),
@@ -75,6 +79,7 @@ pub fn run_mirror(
     });
 
     let mut queue = VecDeque::new();
+    let mut stats = Stats::default();
     loop {
         if queue.is_empty() {
             match rx.recv() {
@@ -89,6 +94,22 @@ pub fn run_mirror(
                 Err(reason) => return on_event(MirrorEvent::Ended(reason)),
             };
             let newest = !queue.iter().any(|m| matches!(m, Ok(Message::VideoFrame { .. })));
+            if let Message::VideoFrame { data, .. } = &msg {
+                stats.frames += 1;
+                stats.bytes += data.len();
+            }
+            if stats.window.elapsed() >= Duration::from_secs(1) {
+                let secs = stats.window.elapsed().as_secs_f64();
+                on_event(MirrorEvent::Stats {
+                    received_fps: stats.frames as f64 / secs,
+                    mbps: stats.bytes as f64 * 8.0 / 1e6 / secs,
+                    decode_ms: stats.busy.as_secs_f64() * 1000.0 / stats.frames.max(1) as f64,
+                });
+                stats = Stats::default();
+            }
+            let started = Instant::now();
+            let result = decoder.handle_frame(&msg, newest);
+            stats.busy += started.elapsed();
             match &msg {
                 Message::Hello { name, .. } => on_event(MirrorEvent::Connected { name: name.clone() }),
                 Message::StreamConfig { codec, width, height, fps, bitrate_kbps } => on_event(MirrorEvent::Stream {
@@ -102,7 +123,7 @@ pub fn run_mirror(
                 Message::Bye => return on_event(MirrorEvent::Ended("iPad 結束廣播".into())),
                 _ => {}
             }
-            match decoder.handle_frame(&msg, newest) {
+            match result {
                 Ok(Some(frame)) => {
                     if !on_frame(frame) {
                         let _ = send(Message::Bye);
@@ -119,6 +140,21 @@ pub fn run_mirror(
                 }
             }
         }
+    }
+}
+
+/// Counters for one [`MirrorEvent::Stats`] window.
+struct Stats {
+    window: Instant,
+    frames: u32,
+    bytes: usize,
+    /// Time spent decoding (and converting the shown frames).
+    busy: Duration,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self { window: Instant::now(), frames: 0, bytes: 0, busy: Duration::ZERO }
     }
 }
 

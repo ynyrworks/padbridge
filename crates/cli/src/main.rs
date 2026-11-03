@@ -186,6 +186,10 @@ fn mirror(target: &str) -> CliResult {
                     println!("串流 {codec:?} {width}×{height} @{fps} fps, {bitrate_kbps} kbps")
                 }
                 MirrorEvent::Log(text) => println!("[iPad] {text}"),
+                MirrorEvent::Stats { received_fps, mbps, decode_ms } => {
+                    print!("\r收到 {received_fps:5.1} fps · {mbps:6.2} Mbps · 解碼 {decode_ms:5.1} ms   ");
+                    let _ = std::io::stdout().flush();
+                }
                 MirrorEvent::DecodeError(e) => eprintln!("{e}；要求關鍵幀"),
                 MirrorEvent::Ended(reason) => println!("{reason}"),
             },

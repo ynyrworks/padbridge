@@ -75,6 +75,7 @@ struct MirrorShared {
     frame: Option<ColorImage>,
     peer_name: Option<String>,
     stream_info: Option<String>,
+    link_stats: Option<String>,
     ended: Option<String>,
     /// Clone of the socket so the UI can stop the session.
     shutdown: Option<TcpStream>,
@@ -240,6 +241,10 @@ impl PadBridgeApp {
                         }
                         MirrorEvent::Log(text) => {
                             let _ = log.send(format!("[iPad] {text}"));
+                        }
+                        MirrorEvent::Stats { received_fps, mbps, decode_ms } => {
+                            s.link_stats =
+                                Some(format!("· 收到 {received_fps:.0} fps · {mbps:.1} Mbps · 解碼 {decode_ms:.1} ms"));
                         }
                         MirrorEvent::DecodeError(e) => {
                             let _ = log.send(format!("解碼錯誤，已要求關鍵幀：{e}"));
@@ -617,9 +622,9 @@ impl PadBridgeApp {
             welcome(ui);
             return;
         };
-        let (frame, peer, info, ended) = {
+        let (frame, peer, info, link, ended) = {
             let mut s = view.shared.lock().unwrap();
-            (s.frame.take(), s.peer_name.clone(), s.stream_info.clone(), s.ended.clone())
+            (s.frame.take(), s.peer_name.clone(), s.stream_info.clone(), s.link_stats.clone(), s.ended.clone())
         };
         if let Some(image) = frame {
             match view.texture.as_mut() {
@@ -642,7 +647,11 @@ impl PadBridgeApp {
                 ui.label(RichText::new(info).weak());
             }
             if ended.is_none() && view.texture.is_some() {
-                ui.label(RichText::new(format!("{:.0} fps", view.fps)).weak());
+                ui.label(RichText::new(format!("顯示 {:.0} fps", view.fps)).weak());
+                if let Some(link) = &link {
+                    ui.label(RichText::new(link).weak())
+                        .on_hover_text("iPad 實際送來的畫格數與流量，以及每格解碼所花的時間");
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 stop = ui.button(if ended.is_some() { "關閉" } else { "⏹ 停止" }).clicked();
