@@ -1,5 +1,9 @@
 //! Windows-side PadBridge logic shared by the CLI and the desktop app.
 
+// First, so its tr! macro is visible in the other modules.
+#[macro_use]
+pub mod i18n;
+
 #[cfg(windows)]
 pub mod capture;
 pub mod discovery;

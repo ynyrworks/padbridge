@@ -43,9 +43,9 @@ pub struct Monitor {
 impl Monitor {
     pub fn label(&self) -> String {
         let name = self.device_name.trim_start_matches(r"\\.\");
-        let primary = if self.primary { " · 主螢幕" } else { "" };
+        let primary = if self.primary { tr!(" · 主螢幕", " · primary") } else { String::new() };
         match &self.virtual_adapter {
-            Some(adapter) => format!("{name} · {}×{}{primary} · 虛擬 · {adapter}", self.width, self.height),
+            Some(adapter) => tr!("{name} · {}×{}{primary} · 虛擬 · {adapter}", "{name} · {}×{}{primary} · virtual · {adapter}", self.width, self.height),
             None => format!("{name} · {}×{}{primary} · {}", self.width, self.height, self.adapter),
         }
     }
@@ -173,7 +173,7 @@ impl Capturer {
         let (adapter, output, monitor) = outputs()?
             .into_iter()
             .nth(monitor_index)
-            .ok_or_else(|| format!("找不到第 {monitor_index} 個螢幕"))?;
+            .ok_or_else(|| tr!("找不到第 {monitor_index} 個螢幕", "Monitor {monitor_index} not found"))?;
         // Video support is needed for GPU scaling / hardware encoding; fall back without it.
         let (device, context) = create_device(&adapter, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT)
             .or_else(|_| create_device(&adapter, D3D11_CREATE_DEVICE_BGRA_SUPPORT))?;

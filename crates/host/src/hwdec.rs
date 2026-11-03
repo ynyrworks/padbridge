@@ -79,7 +79,7 @@ impl HardwareDecoder {
             let (transform, mft_name) = activate_decoder()?;
             let attributes = transform.GetAttributes()?;
             if attributes.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 0 {
-                return Err(format!("{mft_name} 不支援 D3D11 硬體解碼").into());
+                return Err(tr!("{mft_name} 不支援 D3D11 硬體解碼", "{mft_name} does not support D3D11 hardware decoding").into());
             }
             let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
             if let Ok(api) = transform.cast::<ICodecAPI>() {
@@ -120,7 +120,7 @@ impl HardwareDecoder {
             decoder.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
             let info = decoder.transform.GetOutputStreamInfo(0)?;
             if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
-                return Err("解碼器沒有輸出 GPU 畫面".into());
+                return Err(tr!("解碼器沒有輸出 GPU 畫面", "The decoder does not output GPU surfaces").into());
             }
             Ok(decoder)
         }
@@ -148,7 +148,7 @@ impl HardwareDecoder {
                     // Full: collect what's ready, then offer the input again.
                     Err(e) if e.code() == MF_E_NOTACCEPTING => {
                         if !self.drain(rotation, want_image, &mut picture)? {
-                            return Err("硬體解碼器不接受輸入".into());
+                            return Err(tr!("硬體解碼器不接受輸入", "The hardware decoder refuses input").into());
                         }
                     }
                     Err(e) => return Err(e.into()),
@@ -216,7 +216,7 @@ impl HardwareDecoder {
                 break;
             }
         }
-        let output = chosen.ok_or("解碼器沒有 NV12 輸出")?;
+        let output = chosen.ok_or_else(|| tr!("解碼器沒有 NV12 輸出", "The decoder has no NV12 output"))?;
         self.transform.SetOutputType(0, &output, 0)?;
         let size = output.GetUINT64(&MF_MT_FRAME_SIZE)?;
         self.coded = ((size >> 32) as u32, size as u32);
@@ -406,7 +406,7 @@ unsafe fn activate_decoder() -> Result<(IMFTransform, String), BoxError> {
     )?;
     let list: Vec<Option<IMFActivate>> = (0..count as usize).map(|i| std::ptr::read(activates.add(i))).collect();
     CoTaskMemFree(Some(activates as *const _));
-    let mut last_error: BoxError = "找不到 H.264 解碼器".into();
+    let mut last_error: BoxError = tr!("找不到 H.264 解碼器", "No H.264 decoder found").into();
     for activate in list.into_iter().flatten() {
         let name = friendly_name(&activate).unwrap_or_else(|| "H.264 decoder".into());
         match activate.ActivateObject::<IMFTransform>() {

@@ -262,7 +262,9 @@ mod session {
         Streaming { monitor: String, width: usize, height: usize, encoder: String },
         Stats { fps: f64, kbps: f64, encode_ms: f64 },
         Log(String),
-        Ended(String),
+        /// `lost`: the connection dropped (worth reconnecting), as opposed to
+        /// being stopped or failing for another reason.
+        Ended { reason: String, lost: bool },
     }
 
     enum Encoder {
@@ -274,9 +276,11 @@ mod session {
     impl Encoder {
         fn name(&self) -> String {
             match self {
-                Encoder::Hardware(e, None) => format!("硬體：{}", e.name()),
-                Encoder::Hardware(e, Some(upload)) => format!("硬體：{}（{}，跨 GPU 複製）", e.name(), upload.gpu.label()),
-                Encoder::Software(_) => "軟體：OpenH264".into(),
+                Encoder::Hardware(e, None) => tr!("硬體：{}", "Hardware: {}", e.name()),
+                Encoder::Hardware(e, Some(upload)) => {
+                    tr!("硬體：{}（{}，跨 GPU 複製）", "Hardware: {} ({}, copied across GPUs)", e.name(), upload.gpu.label())
+                }
+                Encoder::Software(_) => tr!("軟體：OpenH264", "Software: OpenH264"),
             }
         }
 
@@ -335,11 +339,12 @@ mod session {
         stop: &AtomicBool,
         mut on_event: impl FnMut(DisplayEvent),
     ) {
-        let reason = match stream_display(link, host_name, settings, stop, &mut on_event) {
-            Ok(reason) => reason,
-            Err(e) => format!("錯誤：{e}"),
+        let (reason, lost) = match stream_display(link, host_name, settings, stop, &mut on_event) {
+            Ok(end) => end,
+            // Socket errors mean the link went away; anything else (capture, encoder) won't fix itself.
+            Err(e) => (tr!("錯誤：{e}", "Error: {e}"), e.downcast_ref::<std::io::Error>().is_some()),
         };
-        on_event(DisplayEvent::Ended(reason));
+        on_event(DisplayEvent::Ended { reason, lost });
     }
 
     /// Waits for the first desktop image so its size is known.
@@ -349,7 +354,7 @@ mod session {
                 return Ok(());
             }
         }
-        Err("擷取不到螢幕畫面".into())
+        Err(tr!("擷取不到螢幕畫面", "No image from the monitor").into())
     }
 
     /// Hardware encoding when chosen and available, otherwise software with CPU readback.
@@ -365,7 +370,7 @@ mod session {
         if let Some(gpu) = gpu {
             match open_hardware(settings, gpu) {
                 Ok(pair) => return Ok(pair),
-                Err(e) => on_event(DisplayEvent::Log(format!("無法使用硬體編碼，改用軟體編碼：{e}"))),
+                Err(e) => on_event(DisplayEvent::Log(tr!("無法使用硬體編碼，改用軟體編碼：{e}", "Hardware encoding unavailable, using software: {e}"))),
             }
         }
         let mut capturer = Capturer::new(settings.monitor, true)?;
@@ -394,7 +399,7 @@ mod session {
         settings: DisplaySettings,
         stop: &AtomicBool,
         on_event: &mut impl FnMut(DisplayEvent),
-    ) -> Result<String, crate::BoxError> {
+    ) -> Result<(String, bool), crate::BoxError> {
         let SecureLink { reader, mut writer, .. } = link;
         let send = |writer: &mut SecureWriter, message: &Message| -> Result<usize, crate::BoxError> {
             let frame = message.to_frame()?;
@@ -425,12 +430,12 @@ mod session {
         loop {
             if stop.load(Ordering::Relaxed) {
                 let _ = send(&mut writer, &Message::Bye);
-                return Ok("已停止".into());
+                return Ok((tr!("已停止", "Stopped"), false));
             }
             while let Ok(event) = events_rx.try_recv() {
                 match event {
                     Some(event) => on_event(event),
-                    None => return Ok("iPad 已中斷連線".into()),
+                    None => return Ok((tr!("iPad 已中斷連線", "The iPad disconnected"), true)),
                 }
             }
 
@@ -446,7 +451,7 @@ mod session {
                     None => Message::Cursor { x: 0.0, y: 0.0, visible: false },
                 };
                 if send(&mut writer, &message).is_err() {
-                    return Ok("連線中斷".into());
+                    return Ok((tr!("連線中斷", "Connection lost"), true));
                 }
                 sent_cursor = Some(cursor);
             }
@@ -493,7 +498,7 @@ mod session {
             for message in &messages {
                 match send(&mut writer, message) {
                     Ok(n) => bytes += n,
-                    Err(_) => return Ok("連線中斷".into()),
+                    Err(_) => return Ok((tr!("連線中斷", "Connection lost"), true)),
                 }
             }
             frames += 1;
@@ -525,7 +530,7 @@ mod session {
         let injector = input_rect.and_then(|_| match Injector::new() {
             Ok(injector) => Some(injector),
             Err(e) => {
-                let _ = events.send(Some(DisplayEvent::Log(format!("無法啟用觸控輸入：{e}"))));
+                let _ = events.send(Some(DisplayEvent::Log(tr!("無法啟用觸控輸入：{e}", "Touch input unavailable: {e}"))));
                 None
             }
         });
@@ -556,7 +561,7 @@ mod session {
                                 if !reported_injection_error {
                                     reported_injection_error = true;
                                     // Typically: the target window runs as administrator.
-                                    let _ = events.send(Some(DisplayEvent::Log(format!("輸入注入失敗：{e}"))));
+                                    let _ = events.send(Some(DisplayEvent::Log(tr!("輸入注入失敗：{e}", "Input injection failed: {e}"))));
                                 }
                             }
                         }
@@ -717,7 +722,7 @@ mod tests {
     fn run_mirror_hardware() {
         let events = mirror_session(crate::mirror::DecoderChoice::Auto);
         assert!(
-            events.iter().any(|e| matches!(e, crate::mirror::MirrorEvent::Decoder(name) if name.starts_with("硬體"))),
+            events.iter().any(|e| matches!(e, crate::mirror::MirrorEvent::Decoder(name) if name.contains("MFT"))),
             "fell back to software: {events:?}"
         );
     }
@@ -772,7 +777,7 @@ mod tests {
         ipad.join().unwrap();
         assert!(shown.load(Ordering::Relaxed) >= 1, "no frame shown: {events:?}");
         assert!(events.contains(&MirrorEvent::Connected { name: "test iPad".into() }));
-        assert_eq!(events.last(), Some(&MirrorEvent::Ended("iPad 結束廣播".into())));
+        assert!(matches!(events.last(), Some(MirrorEvent::Ended { lost: true, .. })), "{events:?}");
         events
     }
 

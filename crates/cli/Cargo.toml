@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 minifb = "0.29.0"
-padbridge-host = { version = "0.1.0", path = "../host" }
+padbridge-host = { path = "../host" }
 padbridge-protocol = { path = "../protocol" }
 padbridge-usbmux = { path = "../usbmux" }
+
+[build-dependencies]
+winresource = "0.1"

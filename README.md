@@ -2,6 +2,8 @@
 
 開源的 iPad ⇄ Windows 畫面共享工具，USB 有線與 Wi‑Fi 無線都能用。
 
+> **English:** PadBridge is open-source iPad ⇄ Windows screen sharing over USB or Wi‑Fi: use the iPad as an extended or mirrored Windows display with touch and Apple Pencil, or show the iPad's screen in a Windows window. Every connection is paired and encrypted. The Windows app follows the Windows display language (Chinese or English) and can be switched in the app. See [Code signing policy](#code-signing-policy) and [Privacy](#privacy).
+
 - **延伸螢幕（Display）**：iPad 當 Windows 的延伸或鏡像螢幕，支援觸控、Apple Pencil（壓力、傾斜、懸停）與巧控鍵盤觸控板。
 - **鏡像（Mirror）**：iPad 畫面即時顯示在 Windows 視窗中。
 
@@ -17,13 +19,17 @@
 - **選擇 GPU**：同時有內顯與獨顯的電腦，可以分別指定編碼和解碼要用哪張顯示卡，或改用 CPU。
 - **低延遲**：只在畫面變動時編碼；游標由 iPad 自己繪製；接收端跟不上時只顯示最新一格，延遲不會累積。
 - **狀態顯示**：鏡像視窗顯示「顯示 fps／收到 fps／流量／解碼時間」，方便判斷瓶頸。
+- **配對與加密**：每條連線（USB 或 Wi‑Fi）都會先驗證雙方身分並加密；第一次連線時，兩邊會顯示同一組 6 位數字讓你確認配對。
+- **自動重新連線**：拔掉 USB、換 Wi‑Fi、電腦睡眠、iPad App 切到背景或停止廣播時，會自動重試，恢復後繼續。
+- **中文 / English**：介面跟隨 Windows 語言，也可以在 App 中切換。
+- **設定會記住**：選的螢幕、編解碼方式、畫質與語言，下次開啟時沿用。
 
 ## 安裝
 
 ### Windows
 
 1. 安裝 **iTunes**（Apple 官網的桌面版）或 Microsoft Store 的「**Apple 裝置**」App。USB 連線需要它提供的 Apple Mobile Device Service。
-2. 從 [Releases](https://github.com/ynyrworks/padbridge/releases/latest) 下載 `PadBridge-…-windows-x64.zip`，解壓後執行 `PadBridge.exe`。裡面也有命令列版 `padbridge-cli.exe` 與授權檔。想試最新開發版，可以從 [Actions](https://github.com/ynyrworks/padbridge/actions) 最新一次成功建置下載 `PadBridge-windows`。
+2. 從 [Releases](https://github.com/ynyrworks/padbridge/releases/latest) 下載 `PadBridge-…-setup.exe` 安裝（不需要系統管理員權限），或下載 `PadBridge-…-windows-x64.zip` 解壓後直接執行 `PadBridge.exe`。兩者都包含命令列版 `padbridge-cli.exe` 與授權檔。想試最新開發版，可以從 [Actions](https://github.com/ynyrworks/padbridge/actions) 最新一次成功建置下載 `PadBridge-windows`。
 3. 第一次執行時，Windows 防火牆可能會詢問，請允許「私人網路」（Bonjour 需要）。
 
 ### iPad（不需要 Mac）
@@ -36,6 +42,14 @@
    - 打開 PadBridge，允許「區域網路」權限。
 
 ## 使用
+
+### 第一次連線：配對
+
+第一次從某台電腦連到某台 iPad 時，Windows 和 iPad 都會跳出配對確認，顯示同一組 6 位數字。數字相同才在兩邊按「配對」；不同代表可能有人冒充，請取消。配對之後就不再詢問，連線全程加密。
+
+- 已配對的裝置列在 Windows App 左側「已配對的 iPad」與 iPad App 的「已配對的電腦」，都可以取消配對。
+- 鏡像用的廣播擴充沒有畫面可以確認，所以**只接受已經在 PadBridge App 裡配對過的電腦**：請先用「延伸螢幕」或「⏱ 測試連線」配對一次。
+- 廣播擴充透過 App Group 讀取 App 的配對資料。若 iPad App 顯示「缺少 App Group」，表示簽章工具沒有保留 App Group，鏡像會拒絕所有電腦。
 
 ### 延伸螢幕（Windows → iPad）
 
@@ -67,6 +81,12 @@
 | CPU | OpenH264 軟體編碼 | OpenH264 軟體解碼 |
 
 硬體無法使用時會自動改用 CPU，原因會寫在事件紀錄。
+
+同一區還可以設定延伸螢幕的畫質（最大寬度、位元率、最高 fps）與介面語言。
+
+### 連線中斷時
+
+連線意外中斷時（拔掉 USB、Wi‑Fi 斷線、電腦睡眠、iPad App 切到背景、停止廣播），App 會每隔 2～10 秒自動重試，USB 重新插上後也找得到同一台 iPad。按「關閉」取消重試。
 
 ### 效能參考
 
@@ -103,7 +123,15 @@ padbridge-cli display usb 1
 padbridge-cli mirror usb
 ```
 
-`<目標>` 可以是 `usb`、`usb:<UDID>` 或 iPad 的 IP。`PadBridge.exe --mirror usb` / `--display usb` 會在啟動後立刻開始，適合做成捷徑。
+```bash
+padbridge-cli paired
+```
+
+```bash
+padbridge-cli unpair <金鑰開頭或名稱>
+```
+
+`<目標>` 可以是 `usb`、`usb:<UDID>` 或 iPad 的 IP。`PadBridge.exe --mirror usb` / `--display usb` 會在啟動後立刻開始，適合做成捷徑。命令列的語言跟隨 Windows，可用環境變數 `PADBRIDGE_LANG=en` 或 `zh` 指定。
 
 ## 開發
 
@@ -141,6 +169,30 @@ iOS 端由 GitHub Actions 的 `ios` job 以 XcodeGen 產生專案、跑 Swift �
 - 鏡像需要每次手動開始廣播，這是 iOS 的限制。
 - iPad 端目前輸出 H.264 Constrained Baseline；HEVC 與 High profile 尚未支援。
 - 從原始碼編譯的 OpenH264 不在 Cisco 的 H.264 專利授權範圍內，詳見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- iPad App 的介面目前只有中文。
+- 鏡像需要 iPad 安裝時保留 App Group（見「第一次連線：配對」）。
+
+## Code signing policy
+
+Windows 版本已申請 [SignPath Foundation](https://signpath.org/) 的免費開源程式碼簽章；核准後，發行版會在 GitHub Actions 由本儲存庫的原始碼自動建置，並在人工核准後簽章。
+
+Windows releases are being set up for free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). Signed binaries are built by GitHub Actions from this repository's source, and every signing request is approved manually.
+
+| 角色 Role | 成員 Members |
+|---|---|
+| 作者 Committers and reviewers | [ynyrworks](https://github.com/ynyrworks) |
+| 核准者 Approvers | [ynyrworks](https://github.com/ynyrworks) |
+
+iPad App 不經此流程，由使用者以自己的 Apple ID 簽章安裝。The iPad app is not part of this; users sign it with their own Apple ID.
+
+## Privacy
+
+除非使用者明確要求，PadBridge 不會把任何資訊傳送到其他網路系統。This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+- 只連線到使用者選擇的 iPad；畫面、觸控與配對資料只在這兩台裝置之間傳送，且全程加密。
+- 以 Bonjour 在區域網路上尋找 iPad，不會連到網際網路上的伺服器；沒有遙測、沒有帳號。
+- 只有在使用者按下「安裝虛擬螢幕」時，才會透過 winget 從 GitHub 下載 Virtual Display Driver 的控制程式。
+- 配對金鑰與設定只存在本機：Windows 在 `%APPDATA%\PadBridge`（金鑰以 DPAPI 加密），iPad 在 App 的 App Group 容器。
 
 ## 授權
 

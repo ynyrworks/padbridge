@@ -59,6 +59,19 @@ final class DisplayService: ObservableObject {
         }
     }
 
+    /// Whether the listener stopped working (it may not survive the background).
+    private var listenerFailed = false
+
+    /// Starts over if the listener died while the app was in the background.
+    func restartIfNeeded() {
+        guard listenerFailed, let old = server else { return }
+        old.stop()
+        server = nil
+        listenerFailed = false
+        append("重新啟動監聽")
+        start()
+    }
+
     func start() {
         guard server == nil else { return }
         refreshPairedHosts()
@@ -144,6 +157,7 @@ final class DisplayService: ObservableObject {
             append("中斷：\(peer.remoteDescription) \(error.map { "\($0)" } ?? "")")
         case let .failed(error):
             status = "監聽失敗：\(error)"
+            listenerFailed = true
         }
     }
 

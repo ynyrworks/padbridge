@@ -114,14 +114,20 @@ impl fmt::Display for SecureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SecureError::Io(e) => write!(f, "{e}"),
-            SecureError::BadMagic => write!(f, "對方不支援加密連線（請把 iPad 與 Windows 端都更新到同一版）"),
-            SecureError::WeakKey => write!(f, "對方的金鑰無效"),
-            SecureError::Decrypt => write!(f, "加密資料驗證失敗"),
-            SecureError::Malformed(what) => write!(f, "握手資料格式錯誤：{what}"),
-            SecureError::DeclinedHere => write!(f, "已取消配對"),
-            SecureError::Refused(Verdict::Rejected) => write!(f, "iPad 拒絕了配對"),
+            SecureError::BadMagic => f.write_str(&tr!(
+                "對方不支援加密連線（請把 iPad 與 Windows 端都更新到同一版）",
+                "The other side does not support encrypted connections (update the iPad and Windows apps to the same version)"
+            )),
+            SecureError::WeakKey => f.write_str(&tr!("對方的金鑰無效", "The other side sent an invalid key")),
+            SecureError::Decrypt => f.write_str(&tr!("加密資料驗證失敗", "Encrypted data failed verification")),
+            SecureError::Malformed(what) => f.write_str(&tr!("握手資料格式錯誤：{what}", "Malformed handshake: {what}")),
+            SecureError::DeclinedHere => f.write_str(&tr!("已取消配對", "Pairing cancelled")),
+            SecureError::Refused(Verdict::Rejected) => f.write_str(&tr!("iPad 拒絕了配對", "The iPad declined pairing")),
             SecureError::Refused(Verdict::NotPaired) => {
-                write!(f, "這台電腦尚未與 iPad 配對：請先在 iPad 開啟 PadBridge App，從 Windows 按「延伸螢幕」或「測試連線」完成配對")
+                f.write_str(&tr!(
+                    "這台電腦尚未與 iPad 配對：請先在 iPad 開啟 PadBridge App，從 Windows 按「延伸螢幕」或「測試連線」完成配對",
+                    "This computer is not paired with the iPad yet: open the PadBridge app on the iPad, then pair by choosing Extend or Test connection on Windows"
+                ))
             }
             SecureError::Refused(Verdict::Accepted) => write!(f, "unexpected"),
         }

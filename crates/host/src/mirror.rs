@@ -32,7 +32,9 @@ pub enum MirrorEvent {
     Stats { received_fps: f64, mbps: f64, decode_ms: f64 },
     /// Recoverable: a keyframe has been requested.
     DecodeError(String),
-    Ended(String),
+    /// `lost`: the connection or broadcast went away (worth reconnecting),
+    /// as opposed to being stopped or failing for another reason.
+    Ended { reason: String, lost: bool },
 }
 
 /// Runs a mirror session on the calling thread until the iPad disconnects,
@@ -48,14 +50,16 @@ pub fn run_mirror(
     let SecureLink { reader: mut stream, mut writer, .. } = link;
     let mut send = |msg: Message| writer.write_all(&msg.to_frame().expect("small message"));
     if let Err(e) = send(Message::Hello { version: PROTOCOL_VERSION, role: Role::Host, name: host_name.into() }) {
-        return on_event(MirrorEvent::Ended(format!("連線錯誤：{e}")));
+        return on_event(MirrorEvent::Ended { reason: tr!("連線錯誤：{e}", "Connection error: {e}"), lost: true });
     }
     let (mut decoder, fallback) = match MirrorDecoder::with_choice(choice) {
         Ok(d) => d,
-        Err(e) => return on_event(MirrorEvent::Ended(format!("無法初始化解碼器：{e}"))),
+        Err(e) => {
+            return on_event(MirrorEvent::Ended { reason: tr!("無法初始化解碼器：{e}", "Could not start the decoder: {e}"), lost: false })
+        }
     };
     on_event(MirrorEvent::Decoder(match fallback {
-        Some(reason) => format!("{}（無法使用硬體解碼：{reason}）", decoder.name()),
+        Some(reason) => tr!("{}（無法使用硬體解碼：{reason}）", "{} (hardware decoding unavailable: {reason})", decoder.name()),
         None => decoder.name(),
     }));
 
@@ -69,9 +73,9 @@ pub fn run_mirror(
         let mut buf = vec![0u8; 256 * 1024];
         loop {
             let n = match stream.read(&mut buf) {
-                Ok(0) => return tx.send(Err("iPad 已中斷連線".to_string())),
+                Ok(0) => return tx.send(Err(tr!("iPad 已中斷連線", "The iPad disconnected"))),
                 Ok(n) => n,
-                Err(e) => return tx.send(Err(format!("連線結束：{e}"))),
+                Err(e) => return tx.send(Err(tr!("連線結束：{e}", "Connection ended: {e}"))),
             };
             frames.push(&buf[..n]);
             loop {
@@ -82,7 +86,7 @@ pub fn run_mirror(
                         }
                     }
                     Ok(None) => break,
-                    Err(e) => return tx.send(Err(format!("協定錯誤：{e}"))),
+                    Err(e) => return tx.send(Err(tr!("協定錯誤：{e}", "Protocol error: {e}"))),
                 }
             }
         }
@@ -108,11 +112,11 @@ pub fn run_mirror(
         slot.close();
         end
     });
-    on_event(MirrorEvent::Ended(end));
+    on_event(MirrorEvent::Ended { reason: end.0, lost: end.1 });
 }
 
 /// Decodes everything the reader thread delivers, handing the newest picture
-/// to `slot`. Returns why the session ended.
+/// to `slot`. Returns why the session ended, and whether the link was lost.
 fn decode_loop(
     rx: &mpsc::Receiver<Result<Message, String>>,
     decoder: &mut MirrorDecoder,
@@ -120,7 +124,7 @@ fn decode_loop(
     stopped: &AtomicBool,
     send: &mut impl FnMut(Message) -> std::io::Result<()>,
     on_event: &mut impl FnMut(MirrorEvent),
-) -> String {
+) -> (String, bool) {
     let mut queue = VecDeque::new();
     let mut stats = Stats::default();
     loop {
@@ -128,18 +132,18 @@ fn decode_loop(
             match rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(item) => queue.push_back(item),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return "連線結束".into(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return (tr!("連線結束", "Connection ended"), true),
             }
         }
         if stopped.load(Ordering::Relaxed) {
             let _ = send(Message::Bye);
-            return "已停止".into();
+            return (tr!("已停止", "Stopped"), false);
         }
         queue.extend(rx.try_iter());
         while let Some(item) = queue.pop_front() {
             let msg = match item {
                 Ok(msg) => msg,
-                Err(reason) => return reason,
+                Err(reason) => return (reason, true),
             };
             let newest = !queue.iter().any(|m| matches!(m, Ok(Message::VideoFrame { .. })));
             if let Message::VideoFrame { data, .. } = &msg {
@@ -168,17 +172,17 @@ fn decode_loop(
                     bitrate_kbps: *bitrate_kbps,
                 }),
                 Message::Log { text, .. } => on_event(MirrorEvent::Log(text.clone())),
-                Message::Bye => return "iPad 結束廣播".into(),
+                Message::Bye => return (tr!("iPad 結束廣播", "The iPad stopped broadcasting"), true),
                 _ => {}
             }
             match result {
                 Ok(Some(picture)) => slot.put(picture),
                 Ok(None) => {}
-                Err(e @ MirrorError::UnsupportedCodec(_)) => return e.to_string(),
+                Err(e @ MirrorError::UnsupportedCodec(_)) => return (e.to_string(), false),
                 Err(e) => {
                     on_event(MirrorEvent::DecodeError(e.to_string()));
                     if send(Message::RequestKeyframe).is_err() {
-                        return "連線中斷".into();
+                        return (tr!("連線中斷", "Connection lost"), true);
                     }
                 }
             }
@@ -325,9 +329,9 @@ impl MirrorDecoder {
     /// e.g. "OpenH264（CPU）" or the hardware decoder and its GPU.
     pub fn name(&self) -> String {
         match &self.backend {
-            Backend::Software(_) => "軟體 OpenH264（CPU）".into(),
+            Backend::Software(_) => tr!("軟體 OpenH264（CPU）", "Software OpenH264 (CPU)"),
             #[cfg(windows)]
-            Backend::Hardware(hw) => format!("硬體 {}", hw.name()),
+            Backend::Hardware(hw) => tr!("硬體 {}", "Hardware {}", hw.name()),
         }
     }
 

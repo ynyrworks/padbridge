@@ -30,7 +30,7 @@ pub fn connect(transport: &Transport, port: u16) -> Result<TcpStream, BoxError> 
     let stream = match transport {
         Transport::Usb { device_id } => Usbmux::new().connect(*device_id, port)?,
         Transport::Network(ip) => TcpStream::connect_timeout(&SocketAddr::new(*ip, port), Duration::from_secs(3))
-            .map_err(|e| format!("無法連線 {ip}:{port}：{e}"))?,
+            .map_err(|e| tr!("無法連線 {ip}:{port}：{e}", "Could not connect to {ip}:{port}: {e}"))?,
     };
     stream.set_nodelay(true)?;
     Ok(stream)
@@ -66,7 +66,7 @@ pub fn parse_usb_target(spec: &str, default_port: u16) -> Option<(Option<&str>, 
 pub fn describe_device(d: &Device) -> String {
     let via = match &d.connection {
         ConnectionType::Usb => "USB".to_string(),
-        ConnectionType::Network => "Wi-Fi 同步".to_string(),
+        ConnectionType::Network => tr!("Wi-Fi 同步", "Wi-Fi sync"),
         ConnectionType::Other(s) => s.clone(),
     };
     format!("#{:<3} {:<8} {}", d.device_id, via, d.serial)
@@ -76,22 +76,24 @@ pub fn describe_device(d: &Device) -> String {
 /// transport and port, plus a human-readable description.
 pub fn resolve_target(spec: &str, default_port: u16) -> Result<(Transport, u16, String), BoxError> {
     if spec == "usb" || spec.starts_with("usb:") {
-        let (udid, port) = parse_usb_target(spec, default_port).ok_or("無效的 USB 目標")?;
+        let (udid, port) = parse_usb_target(spec, default_port).ok_or_else(|| tr!("無效的 USB 目標", "Invalid USB target"))?;
         let devices = Usbmux::new().list_devices()?;
         let device = devices
             .iter()
             .filter(|d| d.connection == ConnectionType::Usb)
             .find(|d| udid.is_none_or(|u| d.serial.eq_ignore_ascii_case(u)))
-            .ok_or("找不到 USB 連接的 iPad（執行 `padbridge-cli devices` 檢查）")?;
-        let description = format!("USB {} 埠 {port}", describe_device(device));
+            .ok_or_else(|| {
+                tr!("找不到 USB 連接的 iPad（執行 `padbridge-cli devices` 檢查）", "No iPad connected over USB (check with `padbridge-cli devices`)")
+            })?;
+        let description = tr!("USB {} 埠 {port}", "USB {} port {port}", describe_device(device));
         Ok((Transport::Usb { device_id: device.device_id }, port, description))
     } else {
         let with_port = if spec.contains(':') { spec.to_string() } else { format!("{spec}:{default_port}") };
         let addr = with_port
             .to_socket_addrs()
-            .map_err(|e| format!("無法解析 {with_port}：{e}"))?
+            .map_err(|e| tr!("無法解析 {with_port}：{e}", "Could not resolve {with_port}: {e}"))?
             .next()
-            .ok_or_else(|| format!("無法解析 {with_port}"))?;
+            .ok_or_else(|| tr!("無法解析 {with_port}", "Could not resolve {with_port}"))?;
         Ok((Transport::Network(addr.ip()), addr.port(), addr.to_string()))
     }
 }

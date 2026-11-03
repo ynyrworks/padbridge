@@ -37,8 +37,8 @@ impl Gpu {
     }
 
     pub fn label(&self) -> String {
-        let kind = if self.integrated() { "內顯" } else { "獨顯" };
-        format!("{}（{kind}）", self.name)
+        let kind = if self.integrated() { tr!("內顯", "integrated") } else { tr!("獨顯", "discrete") };
+        tr!("{}（{kind}）", "{} ({kind})", self.name)
     }
 }
 
@@ -118,8 +118,8 @@ pub fn open_video_device(id: Option<GpuId>) -> Result<(ID3D11Device, Gpu), BoxEr
     let mut ordered: Vec<_> = list.iter().collect();
     ordered.sort_by_key(|(_, g)| g.integrated());
     let (adapter, gpu) = match id {
-        Some(id) => ordered.into_iter().find(|(_, g)| g.id == id).ok_or("找不到選擇的 GPU")?,
-        None => ordered.into_iter().next().ok_or("找不到 GPU")?,
+        Some(id) => ordered.into_iter().find(|(_, g)| g.id == id).ok_or_else(|| tr!("找不到選擇的 GPU", "The chosen GPU is gone"))?,
+        None => ordered.into_iter().next().ok_or_else(|| tr!("找不到 GPU", "No GPU found"))?,
     };
     let (device, _) = create_device(adapter, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT)?;
     if let Ok(multithread) = device.cast::<ID3D11Multithread>() {

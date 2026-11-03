@@ -96,28 +96,33 @@ pub fn send_command(command: &str) -> io::Result<()> {
 /// resolution: adds the mode to the driver if needed, then switches to it.
 pub fn fit_monitor(device_name: &str, width: u32, height: u32, log: &mut impl FnMut(String)) -> Result<(), BoxError> {
     let path = settings_path();
-    let xml = fs::read_to_string(&path).map_err(|e| format!("讀不到 {}：{e}", path.display()))?;
+    let xml = fs::read_to_string(&path).map_err(|e| tr!("讀不到 {}：{e}", "Cannot read {}: {e}", path.display()))?;
     if let Some(updated) = add_resolution(&xml, width, height, 60) {
-        fs::write(&path, updated).map_err(|e| format!("無法寫入 {}：{e}", path.display()))?;
-        log(format!("已把 {width}×{height} 加入虛擬螢幕的解析度清單，重新載入驅動…"));
-        send_command("RELOAD_DRIVER").map_err(|e| format!("無法通知驅動重新載入：{e}"))?;
+        fs::write(&path, updated).map_err(|e| tr!("無法寫入 {}：{e}", "Cannot write {}: {e}", path.display()))?;
+        log(tr!(
+            "已把 {width}×{height} 加入虛擬螢幕的解析度清單，重新載入驅動…",
+            "Added {width}×{height} to the virtual display's modes, reloading the driver…"
+        ));
+        send_command("RELOAD_DRIVER").map_err(|e| tr!("無法通知驅動重新載入：{e}", "Could not ask the driver to reload: {e}"))?;
     }
     // The new mode shows up once the driver has re-announced its monitors.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match set_mode(device_name, width, height) {
             Ok(()) => break,
-            Err(e) if Instant::now() >= deadline => return Err(format!("無法切換到 {width}×{height}：{e}").into()),
+            Err(e) if Instant::now() >= deadline => {
+                return Err(tr!("無法切換到 {width}×{height}：{e}", "Could not switch to {width}×{height}: {e}").into())
+            }
             Err(_) => thread::sleep(Duration::from_millis(500)),
         }
     }
-    log(format!("虛擬螢幕已切換為 {width}×{height}"));
+    log(tr!("虛擬螢幕已切換為 {width}×{height}", "Virtual display set to {width}×{height}"));
     Ok(())
 }
 
 /// Turns the driver's monitor on when it is installed but showing none.
 pub fn enable_monitor() -> Result<(), BoxError> {
-    send_command("SETDISPLAYCOUNT 1").map_err(|e| format!("無法連到虛擬螢幕驅動：{e}"))?;
+    send_command("SETDISPLAYCOUNT 1").map_err(|e| tr!("無法連到虛擬螢幕驅動：{e}", "Cannot reach the virtual display driver: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if list_monitors()?.iter().any(|m| m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display"))) {
@@ -125,26 +130,30 @@ pub fn enable_monitor() -> Result<(), BoxError> {
         }
         thread::sleep(Duration::from_millis(500));
     }
-    Err("驅動沒有新增螢幕".into())
+    Err(tr!("驅動沒有新增螢幕", "The driver did not add a display").into())
 }
 
 /// Installs the driver's control app with winget and opens it, where the
 /// user presses "Install" (which asks for administrator rights).
 pub fn install(log: &mut impl FnMut(String)) -> Result<(), BoxError> {
-    log(format!("以 winget 下載 Virtual Display Driver（{WINGET_ID}）…"));
+    log(tr!("以 winget 下載 Virtual Display Driver（{WINGET_ID}）…", "Downloading Virtual Display Driver ({WINGET_ID}) with winget…"));
     let output = Command::new("winget")
         .args(["install", "--id", WINGET_ID, "-e", "--accept-source-agreements", "--accept-package-agreements"])
         .args(["--disable-interactivity"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("無法執行 winget（需要 Windows 的「應用程式安裝程式」）：{e}"))?;
+        .map_err(|e| tr!("無法執行 winget（需要 Windows 的「應用程式安裝程式」）：{e}", "Cannot run winget (needs Windows' App Installer): {e}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     // winget exits non-zero when the package is already installed; finding the app is what matters.
     let app = control_app().ok_or_else(|| {
         let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
-        format!("winget 沒有裝好控制程式：{last}")
+        tr!("winget 沒有裝好控制程式：{last}", "winget did not install the control app: {last}")
     })?;
-    log(format!("開啟 {}，請在裡面按「Install Driver」並允許系統管理員權限", app.display()));
+    log(tr!(
+        "開啟 {}，請在裡面按「Install Driver」並允許系統管理員權限",
+        "Opening {}: press Install Driver there and allow administrator rights",
+        app.display()
+    ));
     // Through Explorer so Windows shows the elevation prompt if the app asks for it.
     Command::new("explorer").arg(&app).spawn()?;
     Ok(())

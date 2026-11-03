@@ -175,7 +175,7 @@ pub fn set_mode(device_name: &str, width: u32, height: u32) -> Result<(), String
     if result == DISP_CHANGE_SUCCESSFUL {
         Ok(())
     } else {
-        Err(format!("ChangeDisplaySettingsEx 回傳 {}", result.0))
+        Err(tr!("ChangeDisplaySettingsEx 回傳 {}", "ChangeDisplaySettingsEx returned {}", result.0))
     }
 }
 

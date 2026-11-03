@@ -14,7 +14,9 @@ use padbridge_host::discovery::{Discovery, DiscoveryEvent, Endpoint};
 use padbridge_host::display::{run_display, DisplayEvent, DisplaySettings, EncoderChoice};
 use padbridge_host::gpu::{list_gpus, Gpu};
 use padbridge_host::mirror::{run_mirror, DecoderChoice, Frame, MirrorEvent};
-use padbridge_host::GpuId;
+use padbridge_host::{tr, GpuId};
+
+use crate::settings::{CodecSetting, Settings};
 use padbridge_host::pairing::HostSecurity;
 use padbridge_host::secure::{PairingRequest, SecureLink};
 use padbridge_host::target::{open, resolve_target, Transport};
@@ -40,6 +42,10 @@ pub struct PadBridgeApp {
     gpus: Vec<Gpu>,
     encoder_choice: EncoderChoice,
     decoder_choice: DecoderChoice,
+    /// What was last written to disk; compared each frame to save changes.
+    saved_settings: Settings,
+    /// Display quality and language (not edited elsewhere in the app state).
+    settings: Settings,
     /// A Virtual Display Driver install or enable is running.
     vdd_busy: Arc<AtomicBool>,
     /// Set by background work that changed the monitors.
@@ -68,7 +74,7 @@ struct Opener {
 
 impl Opener {
     fn open(&self, transport: &Transport, port: u16) -> Result<SecureLink, padbridge_host::BoxError> {
-        let security = self.security.as_ref().ok_or("無法載入這台電腦的金鑰（見事件紀錄）")?;
+        let security = self.security.as_ref().ok_or_else(|| tr!("無法載入這台電腦的金鑰（見事件紀錄）", "This computer's key could not be loaded (see the event log)"))?;
         open(transport, port, security, |request| {
             let (answer, response) = mpsc::channel();
             *self.prompt.lock().unwrap() = Some(PairingPrompt { request: request.clone(), answer });
@@ -97,14 +103,35 @@ struct DisplayShared {
     streaming: Option<String>,
     stats: Option<String>,
     ended: Option<String>,
+    /// The session ended because the connection went away: try again.
+    lost: bool,
     /// The virtual monitor was switched to the iPad's resolution; reconnect.
     restart: bool,
 }
 
-struct DisplayView {
+/// Where a session connects to, kept so it can reconnect.
+#[derive(Clone)]
+struct Target {
     title: String,
     transport: Transport,
     port: u16,
+    /// Discovery key of the device, to find it again (a re-plugged USB iPad
+    /// gets a new usbmux id).
+    key: Option<String>,
+    /// Reconnection attempts so far; 0 for a fresh start.
+    attempt: u32,
+}
+
+impl Target {
+    fn manual(title: String, transport: Transport, port: u16) -> Self {
+        Self { title, transport, port, key: None, attempt: 0 }
+    }
+}
+
+struct DisplayView {
+    target: Target,
+    /// When the next reconnection attempt is due.
+    retry_at: Option<Instant>,
     shared: Arc<Mutex<DisplayShared>>,
     stop: Arc<AtomicBool>,
 }
@@ -117,13 +144,17 @@ struct MirrorShared {
     stream_info: Option<String>,
     link_stats: Option<String>,
     ended: Option<String>,
+    /// The session ended because the connection or broadcast went away: try again.
+    lost: bool,
     /// Clone of the socket so the UI can stop the session.
     shutdown: Option<TcpStream>,
     stop_requested: bool,
 }
 
 struct MirrorView {
-    title: String,
+    target: Target,
+    /// When the next reconnection attempt is due.
+    retry_at: Option<Instant>,
     shared: Arc<Mutex<MirrorShared>>,
     texture: Option<TextureHandle>,
     frames_in_window: u32,
@@ -143,6 +174,8 @@ impl MirrorView {
 
 impl PadBridgeApp {
     pub fn new(ctx: egui::Context) -> Self {
+        let settings = Settings::load();
+        apply_language(&settings);
         let (discovery, discovery_events) = Discovery::start();
         let (log_tx, log_rx) = mpsc::channel();
         let mut app = Self {
@@ -162,6 +195,8 @@ impl PadBridgeApp {
             gpus: list_gpus(),
             encoder_choice: EncoderChoice::Auto,
             decoder_choice: DecoderChoice::Auto,
+            saved_settings: Settings::default(),
+            settings,
             vdd_busy: Arc::new(AtomicBool::new(false)),
             monitors_changed: Arc::new(AtomicBool::new(false)),
             security: None,
@@ -172,9 +207,10 @@ impl PadBridgeApp {
         };
         match HostSecurity::load() {
             Ok(security) => app.security = Some(Arc::new(security)),
-            Err(e) => app.push_log(format!("無法載入這台電腦的金鑰，將無法連線：{e}")),
+            Err(e) => app.push_log(tr!("無法載入這台電腦的金鑰，將無法連線：{e}", "Could not load this computer's key; connecting won't work: {e}")),
         }
         app.refresh_monitors();
+        app.apply_settings();
         // `PadBridge.exe --mirror <target>` / `--display <target>` start right away (handy for shortcuts).
         let args: Vec<String> = std::env::args().skip(1).collect();
         if let [flag, target] = args.as_slice() {
@@ -186,8 +222,8 @@ impl PadBridgeApp {
             if let Some(kind) = kind {
                 match resolve_target(target, default_port) {
                     Ok((transport, port, description)) => match kind {
-                        Action::Display => app.start_display(description, transport, port),
-                        _ => app.start_mirror(description, transport, port),
+                        Action::Display => app.start_display(Target::manual(description, transport, port)),
+                        _ => app.start_mirror(Target::manual(description, transport, port)),
                     },
                     Err(e) => app.push_log(format!("{target}：{e}")),
                 }
@@ -208,7 +244,7 @@ impl PadBridgeApp {
                 DiscoveryEvent::Added(endpoint) => {
                     // Bonjour resolves once per network interface; only log new devices.
                     if !self.endpoints.iter().any(|e| e.key == endpoint.key) {
-                        self.push_log(format!("發現 {}（{}）", endpoint.name, endpoint.transport.label()));
+                        self.push_log(tr!("發現 {}（{}）", "Found {} ({})", endpoint.name, endpoint.transport.label()));
                     }
                     self.endpoints.retain(|e| e.key != endpoint.key);
                     self.endpoints.push(endpoint);
@@ -216,7 +252,7 @@ impl PadBridgeApp {
                 }
                 DiscoveryEvent::Removed { key } => {
                     if let Some(e) = self.endpoints.iter().find(|e| e.key == key) {
-                        let line = format!("移除 {}", e.name);
+                        let line = tr!("移除 {}", "Gone: {}", e.name);
                         self.push_log(line);
                     }
                     self.endpoints.retain(|e| e.key != key);
@@ -239,8 +275,115 @@ impl PadBridgeApp {
         if restart {
             if let Some(view) = self.display.take() {
                 self.refresh_monitors();
-                self.start_display_with(view.title, view.transport, view.port, false);
+                self.start_display_with(view.target, false);
             }
+        }
+        self.reconnect_if_due();
+    }
+
+    /// A session whose connection dropped keeps trying (USB unplugged, Wi‑Fi
+    /// change, sleep, the iPad app backgrounded, the broadcast stopped) until
+    /// it reconnects or the user closes it.
+    fn reconnect_if_due(&mut self) {
+        let now = Instant::now();
+        let due = |retry_at: &mut Option<Instant>, target: &mut Target, ended: bool, lost: bool, connected: bool| {
+            if connected {
+                target.attempt = 0;
+            }
+            match *retry_at {
+                None if ended && lost => {
+                    // 2 s, 4 s, … up to 10 s between attempts.
+                    *retry_at = Some(now + Duration::from_secs(u64::from(2 * (target.attempt + 1)).min(10)));
+                    false
+                }
+                Some(at) => at <= now,
+                None => false,
+            }
+        };
+        let mut retry_display = None;
+        if let Some(view) = &mut self.display {
+            let s = view.shared.lock().unwrap();
+            let (ended, lost, connected) = (s.ended.is_some(), s.lost, s.peer_name.is_some());
+            drop(s);
+            if due(&mut view.retry_at, &mut view.target, ended, lost, connected) {
+                retry_display = Some(view.target.clone());
+            }
+        }
+        let mut retry_mirror = None;
+        if let Some(view) = &mut self.mirror {
+            let s = view.shared.lock().unwrap();
+            let (ended, lost, connected) = (s.ended.is_some(), s.lost, s.peer_name.is_some());
+            drop(s);
+            if due(&mut view.retry_at, &mut view.target, ended, lost, connected) {
+                retry_mirror = Some(view.target.clone());
+            }
+        }
+        for (target, display) in [(retry_display, true), (retry_mirror, false)] {
+            let Some(mut target) = target else { continue };
+            target.attempt += 1;
+            // Prefer the device's current address (a re-plugged USB iPad has a new id).
+            if let Some(endpoint) = target.key.as_ref().and_then(|key| self.endpoints.iter().find(|e| &e.key == key)) {
+                target.transport = endpoint.transport.clone();
+            }
+            if display {
+                self.start_display(target);
+            } else {
+                self.start_mirror(target);
+            }
+        }
+        if self.display.as_ref().is_some_and(|v| v.retry_at.is_some()) || self.mirror.as_ref().is_some_and(|v| v.retry_at.is_some()) {
+            self.ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    /// Restores the saved choices, where they still make sense on this machine.
+    fn apply_settings(&mut self) {
+        let s = self.settings.clone();
+        self.allow_input = s.allow_input;
+        let gpu = |name: &str| self.gpus.iter().find(|g| g.name == name).map(|g| g.id);
+        self.encoder_choice = match &s.encoder {
+            CodecSetting::Auto => EncoderChoice::Auto,
+            CodecSetting::Cpu => EncoderChoice::Software,
+            CodecSetting::Gpu(name) => gpu(name).map_or(EncoderChoice::Auto, EncoderChoice::Hardware),
+        };
+        self.decoder_choice = match &s.decoder {
+            CodecSetting::Auto => DecoderChoice::Auto,
+            CodecSetting::Cpu => DecoderChoice::Software,
+            CodecSetting::Gpu(name) => gpu(name).map_or(DecoderChoice::Auto, DecoderChoice::Hardware),
+        };
+        if let Some(monitor) = s.monitor.as_ref().and_then(|name| self.monitors.iter().find(|m| &m.device_name == name)) {
+            self.monitor_index = monitor.index;
+        }
+        self.saved_settings = self.current_settings();
+    }
+
+    fn current_settings(&self) -> Settings {
+        let gpu_name = |id: GpuId| self.gpus.iter().find(|g| g.id == id).map(|g| g.name.clone());
+        Settings {
+            monitor: self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.device_name.clone()),
+            allow_input: self.allow_input,
+            encoder: match self.encoder_choice {
+                EncoderChoice::Auto => CodecSetting::Auto,
+                EncoderChoice::Software => CodecSetting::Cpu,
+                EncoderChoice::Hardware(id) => gpu_name(id).map_or(CodecSetting::Auto, CodecSetting::Gpu),
+            },
+            decoder: match self.decoder_choice {
+                DecoderChoice::Auto => CodecSetting::Auto,
+                DecoderChoice::Software => CodecSetting::Cpu,
+                DecoderChoice::Hardware(id) => gpu_name(id).map_or(CodecSetting::Auto, CodecSetting::Gpu),
+            },
+            ..self.settings.clone()
+        }
+    }
+
+    /// Writes the settings when the user changed something.
+    fn persist_settings(&mut self) {
+        let current = self.current_settings();
+        if current != self.saved_settings {
+            if let Err(e) = current.save() {
+                self.push_log(tr!("無法儲存設定：{e}", "Could not save settings: {e}"));
+            }
+            self.saved_settings = current;
         }
     }
 
@@ -255,22 +398,22 @@ impl PadBridgeApp {
         let mut answer = None;
         egui::Modal::new(egui::Id::new("pairing")).show(ctx, |ui| {
             ui.set_width(360.0);
-            ui.heading(format!("與「{}」配對？", prompt.request.peer_name));
+            ui.heading(tr!("與「{}」配對？", "Pair with \"{}\"?", prompt.request.peer_name));
             ui.add_space(8.0);
-            ui.label("確認 iPad 上顯示的是同一組數字，再兩邊都按「配對」：");
+            ui.label(tr!("確認 iPad 上顯示的是同一組數字，再兩邊都按「配對」：", "Check that the iPad shows the same number, then choose Pair on both:"));
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 let code = &prompt.request.code;
                 ui.label(RichText::new(format!("{} {}", &code[..3], &code[3..])).size(40.0).monospace().strong());
             });
             ui.add_space(8.0);
-            ui.label(RichText::new("數字不同就按取消：可能有人冒充你的 iPad。").small().weak());
+            ui.label(RichText::new(tr!("數字不同就按取消：可能有人冒充你的 iPad。", "If the numbers differ, cancel: someone may be impersonating your iPad.")).small().weak());
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("配對").clicked() {
+                if ui.button(tr!("配對", "Pair")).clicked() {
                     answer = Some(true);
                 }
-                if ui.button("取消").clicked() {
+                if ui.button(tr!("取消", "Cancel")).clicked() {
                     answer = Some(false);
                 }
             });
@@ -286,43 +429,60 @@ impl PadBridgeApp {
     fn paired_list(&mut self, ui: &mut egui::Ui) {
         let Some(security) = self.security.clone() else { return };
         let devices = security.devices();
-        ui.label(RichText::new("已配對的 iPad").strong());
+        ui.label(RichText::new(tr!("已配對的 iPad", "Paired iPads")).strong());
         if devices.is_empty() {
-            ui.label(RichText::new("尚未配對。第一次連線時，兩邊會顯示同一組 6 位數字讓你確認。").small().weak());
+            ui.label(
+                RichText::new(tr!(
+                    "尚未配對。第一次連線時，兩邊會顯示同一組 6 位數字讓你確認。",
+                    "None yet. The first connection shows the same 6-digit code on both screens for you to confirm."
+                ))
+                .small()
+                .weak(),
+            );
         }
         for device in devices {
             ui.horizontal(|ui| {
-                ui.label(&device.name).on_hover_text(format!("金鑰 {}…", &device.key[..16]));
-                if ui.small_button("取消配對").clicked() {
+                ui.label(&device.name).on_hover_text(tr!("金鑰 {}…", "Key {}…", &device.key[..16]));
+                if ui.small_button(tr!("取消配對", "Unpair")).clicked() {
                     match security.forget(&device.key) {
-                        Ok(()) => self.push_log(format!("已取消與「{}」的配對", device.name)),
-                        Err(e) => self.push_log(format!("無法取消配對：{e}")),
+                        Ok(()) => self.push_log(tr!("已取消與「{}」的配對", "Unpaired \"{}\"", device.name)),
+                        Err(e) => self.push_log(tr!("無法取消配對：{e}", "Could not unpair: {e}")),
                     }
                 }
             });
         }
     }
 
-    fn start_mirror(&mut self, title: String, transport: Transport, port: u16) {
+    fn start_mirror(&mut self, target: Target) {
         self.stop_sessions();
-        self.push_log(format!("開始鏡像：{title}"));
+        if target.attempt == 0 {
+            self.push_log(tr!("開始鏡像：{}", "Mirroring: {}", target.title));
+        }
         let shared = Arc::new(Mutex::new(MirrorShared::default()));
         let worker_shared = shared.clone();
         let ctx = self.ctx.clone();
         let log = self.log_tx.clone();
         let decoder = self.decoder_choice;
         let opener = self.opener();
+        let (transport, port, quiet) = (target.transport.clone(), target.port, target.attempt > 0);
         thread::spawn(move || {
             let stream = match opener.open(&transport, port) {
                 Ok(s) => s,
                 Err(e) => {
-                    let reason = format!("連線失敗：{e}");
-                    let _ = log.send(format!("鏡像結束：{reason}"));
-                    worker_shared.lock().unwrap().ended = Some(reason);
+                    let reason = tr!("連線失敗：{e}", "Connection failed: {e}");
+                    if !quiet {
+                        let _ = log.send(tr!("鏡像結束：{reason}", "Mirroring ended: {reason}"));
+                    }
+                    let mut s = worker_shared.lock().unwrap();
+                    s.lost = is_retryable(&e);
+                    s.ended = Some(reason);
                     ctx.request_repaint();
                     return;
                 }
             };
+            if quiet {
+                let _ = log.send(tr!("已重新連線", "Reconnected"));
+            }
             {
                 let mut s = worker_shared.lock().unwrap();
                 if s.stop_requested {
@@ -354,17 +514,21 @@ impl PadBridgeApp {
                             let _ = log.send(format!("[iPad] {text}"));
                         }
                         MirrorEvent::Decoder(name) => {
-                            let _ = log.send(format!("鏡像解碼：{name}"));
+                            let _ = log.send(tr!("鏡像解碼：{name}", "Mirror decoder: {name}"));
                         }
                         MirrorEvent::Stats { received_fps, mbps, decode_ms } => {
                             s.link_stats =
-                                Some(format!("· 收到 {received_fps:.0} fps · {mbps:.1} Mbps · 解碼 {decode_ms:.1} ms"));
+                                Some(tr!(
+                                "· 收到 {received_fps:.0} fps · {mbps:.1} Mbps · 解碼 {decode_ms:.1} ms",
+                                "· received {received_fps:.0} fps · {mbps:.1} Mbps · decode {decode_ms:.1} ms"
+                            ));
                         }
                         MirrorEvent::DecodeError(e) => {
-                            let _ = log.send(format!("解碼錯誤，已要求關鍵幀：{e}"));
+                            let _ = log.send(tr!("解碼錯誤，已要求關鍵幀：{e}", "Decode error, asked for a keyframe: {e}"));
                         }
-                        MirrorEvent::Ended(reason) => {
-                            let _ = log.send(format!("鏡像結束：{reason}"));
+                        MirrorEvent::Ended { reason, lost } => {
+                            let _ = log.send(tr!("鏡像結束：{reason}", "Mirroring ended: {reason}"));
+                            s.lost = lost && !s.stop_requested;
                             s.ended = Some(reason);
                         }
                     }
@@ -373,7 +537,8 @@ impl PadBridgeApp {
             );
         });
         self.mirror = Some(MirrorView {
-            title,
+            target,
+            retry_at: None,
             shared,
             texture: None,
             frames_in_window: 0,
@@ -385,13 +550,13 @@ impl PadBridgeApp {
     fn start_ping(&self, title: String, transport: Transport, port: u16) {
         let log = self.log_tx.clone();
         let ctx = self.ctx.clone();
-        let _ = log.send(format!("測試連線：{title}"));
+        let _ = log.send(tr!("測試連線：{title}", "Testing connection: {title}"));
         let opener = self.opener();
         thread::spawn(move || {
             let result = opener.open(&transport, port).and_then(|stream| {
                 ping_session(stream, &host_name(), 5, Duration::from_millis(200), |event| {
                     if let Event::Received(padbridge_protocol::Message::Hello { name, .. }) = event {
-                        let _ = log.send(format!("已連上 {name}"));
+                        let _ = log.send(tr!("已連上 {name}", "Connected to {name}"));
                     }
                 })
                 .map_err(Into::into)
@@ -401,9 +566,9 @@ impl PadBridgeApp {
                     let ms: Vec<f64> = summary.rtts.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
                     let avg = ms.iter().sum::<f64>() / ms.len() as f64;
                     let max = ms.iter().copied().fold(0.0, f64::max);
-                    format!("{title}：{}/5 個回應，平均 {avg:.1} ms，最大 {max:.1} ms", ms.len())
+                    tr!("{title}：{}/5 個回應，平均 {avg:.1} ms，最大 {max:.1} ms", "{title}: {}/5 replies, average {avg:.1} ms, max {max:.1} ms", ms.len())
                 }
-                Ok(_) => format!("{title}：沒有收到回應"),
+                Ok(_) => tr!("{title}：沒有收到回應", "{title}: no reply"),
                 Err(e) => format!("{title}：{e}"),
             };
             let _ = log.send(line);
@@ -412,7 +577,7 @@ impl PadBridgeApp {
     }
 
     fn device_list(&mut self, ui: &mut egui::Ui) {
-        ui.heading("裝置");
+        ui.heading(tr!("裝置", "Devices"));
         ui.add_space(4.0);
         for (source, message) in &self.source_status {
             if !message.is_empty() {
@@ -420,10 +585,16 @@ impl PadBridgeApp {
             }
         }
         if self.endpoints.is_empty() {
-            ui.label(RichText::new("尚未發現裝置。\n用 USB 接上 iPad（並點「信任」），\n或在同一個網路的 iPad 上開啟 PadBridge App。").weak());
+            ui.label(
+                RichText::new(tr!(
+                    "尚未發現裝置。\n用 USB 接上 iPad（並點「信任」），\n或在同一個網路的 iPad 上開啟 PadBridge App。",
+                    "No devices yet.\nConnect an iPad over USB (and tap Trust),\nor open the PadBridge app on an iPad on this network."
+                ))
+                .weak(),
+            );
         }
 
-        let mut action: Option<(Action, String, Transport, u16)> = None;
+        let mut action: Option<(Action, Target)> = None;
         for endpoint in &self.endpoints {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -433,23 +604,42 @@ impl PadBridgeApp {
                     (transport, _) => transport.label().to_string(),
                 };
                 let role = match endpoint.role {
-                    Some(Role::MirrorSource) => " · 廣播中",
-                    Some(Role::DisplaySink) => " · App 開啟中",
-                    _ => "",
+                    Some(Role::MirrorSource) => tr!(" · 廣播中", " · broadcasting"),
+                    Some(Role::DisplaySink) => tr!(" · App 開啟中", " · app open"),
+                    _ => String::new(),
                 };
                 ui.label(RichText::new(format!("{detail}{role}")).small().weak());
                 ui.horizontal(|ui| {
                     let can_mirror = matches!(endpoint.role, None | Some(Role::MirrorSource));
                     let can_ping = matches!(endpoint.role, None | Some(Role::DisplaySink));
-                    let port_for = |default: u16| endpoint.port.unwrap_or(default);
-                    if can_ping && ui.button("🖥 延伸螢幕").on_hover_text("把下方選擇的螢幕顯示在 iPad 上").clicked() {
-                        action = Some((Action::Display, endpoint.name.clone(), endpoint.transport.clone(), port_for(DISPLAY_PORT)));
+                    let target = |default: u16| Target {
+                        title: endpoint.name.clone(),
+                        transport: endpoint.transport.clone(),
+                        port: endpoint.port.unwrap_or(default),
+                        key: Some(endpoint.key.clone()),
+                        attempt: 0,
+                    };
+                    if can_ping
+                        && ui
+                            .button(tr!("🖥 延伸螢幕", "🖥 Extend"))
+                            .on_hover_text(tr!("把下方選擇的螢幕顯示在 iPad 上", "Show the monitor chosen below on the iPad"))
+                            .clicked()
+                    {
+                        action = Some((Action::Display, target(DISPLAY_PORT)));
                     }
-                    if can_mirror && ui.button("📺 鏡像").on_hover_text("在這裡顯示 iPad 畫面（iPad 需先開始廣播）").clicked() {
-                        action = Some((Action::Mirror, endpoint.name.clone(), endpoint.transport.clone(), port_for(MIRROR_PORT)));
+                    if can_mirror
+                        && ui
+                            .button(tr!("📺 鏡像", "📺 Mirror"))
+                            .on_hover_text(tr!(
+                                "在這裡顯示 iPad 畫面（iPad 需先開始廣播）",
+                                "Show the iPad screen here (start broadcasting on the iPad first)"
+                            ))
+                            .clicked()
+                    {
+                        action = Some((Action::Mirror, target(MIRROR_PORT)));
                     }
-                    if can_ping && ui.button("⏱").on_hover_text("測試連線").clicked() {
-                        action = Some((Action::Ping, endpoint.name.clone(), endpoint.transport.clone(), port_for(DISPLAY_PORT)));
+                    if can_ping && ui.button("⏱").on_hover_text(tr!("測試連線", "Test connection")).clicked() {
+                        action = Some((Action::Ping, target(DISPLAY_PORT)));
                     }
                 });
             });
@@ -469,20 +659,22 @@ impl PadBridgeApp {
 
         ui.add_space(12.0);
         ui.separator();
-        ui.label(RichText::new("手動連線").strong());
-        ui.add(egui::TextEdit::singleline(&mut self.manual_address).hint_text("iPad 的 IP 或 usb").desired_width(f32::INFINITY));
+        ui.label(RichText::new(tr!("手動連線", "Connect manually")).strong());
+        ui.add(egui::TextEdit::singleline(&mut self.manual_address).hint_text(tr!("iPad 的 IP 或 usb", "iPad IP address or usb")).desired_width(f32::INFINITY));
         ui.horizontal(|ui| {
             let address = self.manual_address.trim().to_string();
             ui.add_enabled_ui(!address.is_empty(), |ui| {
                 let buttons = [
-                    (Action::Display, "🖥 延伸螢幕", DISPLAY_PORT),
-                    (Action::Mirror, "📺 鏡像", MIRROR_PORT),
-                    (Action::Ping, "⏱", DISPLAY_PORT),
+                    (Action::Display, tr!("🖥 延伸螢幕", "🖥 Extend"), DISPLAY_PORT),
+                    (Action::Mirror, tr!("📺 鏡像", "📺 Mirror"), MIRROR_PORT),
+                    (Action::Ping, "⏱".to_string(), DISPLAY_PORT),
                 ];
                 for (kind, label, default_port) in buttons {
                     if ui.button(label).clicked() {
                         match resolve_target(&address, default_port) {
-                            Ok((transport, port, description)) => action = Some((kind, description, transport, port)),
+                            Ok((transport, port, description)) => {
+                                action = Some((kind, Target::manual(description, transport, port)));
+                            }
                             Err(e) => {
                                 let _ = self.log_tx.send(format!("{address}：{e}"));
                             }
@@ -492,32 +684,32 @@ impl PadBridgeApp {
             });
         });
 
-        if let Some((kind, title, transport, port)) = action {
+        if let Some((kind, target)) = action {
             match kind {
-                Action::Mirror => self.start_mirror(title, transport, port),
-                Action::Display => self.start_display(title, transport, port),
-                Action::Ping => self.start_ping(title, transport, port),
+                Action::Mirror => self.start_mirror(target),
+                Action::Display => self.start_display(target),
+                Action::Ping => self.start_ping(target.title, target.transport, target.port),
             }
         }
     }
 
     fn monitor_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("傳送到 iPad 的螢幕").strong());
+        ui.label(RichText::new(tr!("傳送到 iPad 的螢幕", "Monitor to show on the iPad")).strong());
         ui.horizontal(|ui| {
             let selected = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.label());
             egui::ComboBox::from_id_salt("monitor")
                 .width(ui.available_width() - 36.0)
-                .selected_text(selected.unwrap_or_else(|| "（沒有螢幕）".into()))
+                .selected_text(selected.unwrap_or_else(|| tr!("（沒有螢幕）", "(no monitor)")))
                 .show_ui(ui, |ui| {
                     for m in &self.monitors {
                         ui.selectable_value(&mut self.monitor_index, m.index, m.label());
                     }
                 });
-            if ui.button("🔄").on_hover_text("重新整理螢幕清單（新增虛擬螢幕後）").clicked() {
+            if ui.button("🔄").on_hover_text(tr!("重新整理螢幕清單（新增虛擬螢幕後）", "Refresh the list (after adding a virtual display)")).clicked() {
                 self.refresh_monitors();
             }
         });
-        ui.checkbox(&mut self.allow_input, "允許 iPad 操作（觸控、Apple Pencil、觸控板）");
+        ui.checkbox(&mut self.allow_input, tr!("允許 iPad 操作（觸控、Apple Pencil、觸控板）", "Let the iPad control this PC (touch, Apple Pencil, trackpad)"));
         let selected_virtual =
             self.monitors.iter().any(|m| m.index == self.monitor_index && m.virtual_adapter.is_some());
         let any_virtual_monitor = self.monitors.iter().any(|m| m.virtual_adapter.is_some());
@@ -525,17 +717,27 @@ impl PadBridgeApp {
         let hint = if selected_virtual {
             None
         } else if any_virtual_monitor {
-            Some("目前選的是實體螢幕，iPad 會鏡像它。清單中標「虛擬」的螢幕才是延伸桌面。".to_string())
+            Some(tr!(
+                "目前選的是實體螢幕，iPad 會鏡像它。清單中標「虛擬」的螢幕才是延伸桌面。",
+                "A physical monitor is selected, so the iPad mirrors it. Monitors marked virtual extend the desktop."
+            ))
         } else if vdd_installed {
-            Some("Virtual Display Driver 已安裝，但目前沒有開啟虛擬螢幕。".to_string())
+            Some(tr!(
+                "Virtual Display Driver 已安裝，但目前沒有開啟虛擬螢幕。",
+                "Virtual Display Driver is installed but has no display turned on."
+            ))
         } else if !self.virtual_adapters.is_empty() {
             let names: Vec<_> = self.virtual_adapters.iter().map(|a| a.name.as_str()).collect();
-            Some(format!(
+            Some(tr!(
                 "偵測到虛擬顯示卡：{}，但目前沒有開啟虛擬螢幕（要由它所屬的軟體開啟）。也可以改裝下面的開源驅動。",
-                names.join("、")
+                "Found virtual display adapters: {}, but none has a display on (their own software turns it on). You can also install the open-source driver below.",
+                names.join(", ")
             ))
         } else {
-            Some("目前只會鏡像既有螢幕。要讓 iPad 成為「延伸」螢幕，需要一個虛擬螢幕。".to_string())
+            Some(tr!(
+                "目前只會鏡像既有螢幕。要讓 iPad 成為「延伸」螢幕，需要一個虛擬螢幕。",
+                "Only existing monitors can be mirrored. To extend the desktop onto the iPad, a virtual display is needed."
+            ))
         };
         if let Some(hint) = hint {
             ui.label(RichText::new(hint).small().weak());
@@ -545,47 +747,47 @@ impl PadBridgeApp {
         }
         let busy = self.vdd_busy.load(Ordering::Relaxed);
         if vdd_installed {
-            let button = ui.add_enabled(!busy, egui::Button::new("🖥 開啟虛擬螢幕"));
+            let button = ui.add_enabled(!busy, egui::Button::new(tr!("🖥 開啟虛擬螢幕", "🖥 Turn on the virtual display")));
             if button.clicked() {
-                self.run_vdd_task("開啟虛擬螢幕", |_| vdd::enable_monitor());
+                self.run_vdd_task(tr!("開啟虛擬螢幕", "Turning on the virtual display"), |_| vdd::enable_monitor());
             }
         } else {
             let button = ui
-                .add_enabled(!busy, egui::Button::new("⬇ 安裝虛擬螢幕（Virtual Display Driver）"))
-                .on_hover_text(
-                    "用 winget 下載開源的 Virtual Display Driver（MIT）控制程式並開啟它；\n\
-                     在控制程式按 Install Driver，Windows 會要求系統管理員權限。\n裝好後按 🔄。",
-                );
+                .add_enabled(!busy, egui::Button::new(tr!("⬇ 安裝虛擬螢幕（Virtual Display Driver）", "⬇ Install a virtual display (Virtual Display Driver)")))
+                .on_hover_text(tr!(
+                    "用 winget 下載開源的 Virtual Display Driver（MIT）控制程式並開啟它；\n在控制程式按 Install Driver，Windows 會要求系統管理員權限。\n裝好後按 🔄。",
+                    "Downloads the open-source Virtual Display Driver (MIT) control app with winget and opens it.\nPress Install Driver there; Windows asks for administrator rights.\nThen press 🔄."
+                ));
             if button.clicked() {
-                self.run_vdd_task("安裝虛擬螢幕", |mut log| vdd::install(&mut log));
+                self.run_vdd_task(tr!("安裝虛擬螢幕", "Installing the virtual display"), |mut log| vdd::install(&mut log));
             }
         }
         if busy {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("處理中…").small());
+                ui.label(RichText::new(tr!("處理中…", "Working…")).small());
             });
         }
     }
 
     /// Which GPU (or the CPU) encodes for Display and decodes for Mirror.
     fn codec_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("編碼 / 解碼").strong());
+        ui.label(RichText::new(tr!("編碼 / 解碼", "Encoding / decoding")).strong());
         let gpu_label = |id: GpuId, gpus: &[Gpu]| {
-            gpus.iter().find(|g| g.id == id).map_or_else(|| "（已不存在的 GPU）".to_string(), Gpu::label)
+            gpus.iter().find(|g| g.id == id).map_or_else(|| tr!("（已不存在的 GPU）", "(GPU no longer present)"), Gpu::label)
         };
         let monitor_gpu = self.monitors.iter().find(|m| m.index == self.monitor_index).map(|m| m.gpu);
 
         let encoder_text = |choice: EncoderChoice, gpus: &[Gpu]| match choice {
-            EncoderChoice::Auto => "自動（螢幕所在的 GPU）".to_string(),
-            EncoderChoice::Software => "CPU（軟體）".to_string(),
+            EncoderChoice::Auto => tr!("自動（螢幕所在的 GPU）", "Auto (the monitor's GPU)"),
+            EncoderChoice::Software => tr!("CPU（軟體）", "CPU (software)"),
             EncoderChoice::Hardware(id) => {
-                let copy = if Some(id) != monitor_gpu { "・跨 GPU 複製" } else { "" };
+                let copy = if Some(id) != monitor_gpu { tr!("・跨 GPU 複製", " · copied across GPUs") } else { String::new() };
                 format!("{}{copy}", gpu_label(id, gpus))
             }
         };
         ui.horizontal(|ui| {
-            ui.label("延伸螢幕編碼");
+            ui.label(tr!("延伸螢幕編碼", "Extend encoder"));
             egui::ComboBox::from_id_salt("encoder")
                 .width(ui.available_width())
                 .selected_text(encoder_text(self.encoder_choice, &self.gpus))
@@ -598,16 +800,19 @@ impl PadBridgeApp {
                     }
                 })
                 .response
-                .on_hover_text("螢幕由哪張顯示卡繪製，就用那張編碼最快；選另一張會多一次經過記憶體的複製。");
+                .on_hover_text(tr!(
+                    "螢幕由哪張顯示卡繪製，就用那張編碼最快；選另一張會多一次經過記憶體的複製。",
+                    "Encoding is fastest on the GPU that draws the monitor; another GPU adds a copy through memory."
+                ));
         });
 
         let decoder_text = |choice: DecoderChoice, gpus: &[Gpu]| match choice {
-            DecoderChoice::Auto => "自動（獨顯優先）".to_string(),
-            DecoderChoice::Software => "CPU（軟體）".to_string(),
+            DecoderChoice::Auto => tr!("自動（獨顯優先）", "Auto (discrete GPU first)"),
+            DecoderChoice::Software => tr!("CPU（軟體）", "CPU (software)"),
             DecoderChoice::Hardware(id) => gpu_label(id, gpus),
         };
         ui.horizontal(|ui| {
-            ui.label("鏡像解碼");
+            ui.label(tr!("鏡像解碼", "Mirror decoder"));
             egui::ComboBox::from_id_salt("decoder")
                 .width(ui.available_width())
                 .selected_text(decoder_text(self.decoder_choice, &self.gpus))
@@ -620,13 +825,59 @@ impl PadBridgeApp {
                     }
                 });
         });
-        ui.label(RichText::new("下次開始延伸螢幕 / 鏡像時套用。").small().weak());
+
+        ui.add_space(8.0);
+        ui.label(RichText::new(tr!("延伸螢幕畫質", "Extend quality")).strong());
+        ui.horizontal(|ui| {
+            ui.label(tr!("最大寬度", "Max width"));
+            egui::ComboBox::from_id_salt("max_width")
+                .selected_text(format!("{} px", self.settings.max_width))
+                .show_ui(ui, |ui| {
+                    for width in [1280, 1600, 1920, 2560, 3840] {
+                        ui.selectable_value(&mut self.settings.max_width, width, format!("{width} px"));
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr!("位元率", "Bitrate"));
+            let mut mbps = self.settings.bitrate_kbps / 1000;
+            if ui.add(egui::Slider::new(&mut mbps, 2..=50).suffix(" Mbps")).changed() {
+                self.settings.bitrate_kbps = mbps * 1000;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr!("最高 fps", "Max fps"));
+            for fps in [30, 60] {
+                ui.selectable_value(&mut self.settings.max_fps, fps, fps.to_string());
+            }
+        });
+        ui.label(RichText::new(tr!("下次開始延伸螢幕 / 鏡像時套用。", "Applies the next time Extend or Mirror starts.")).small().weak());
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("語言 / Language");
+            let name = |language: Option<&str>| match language {
+                Some("zh") => "中文".to_string(),
+                Some("en") => "English".to_string(),
+                _ => tr!("跟隨 Windows", "Same as Windows"),
+            };
+            let before = self.settings.language.clone();
+            egui::ComboBox::from_id_salt("language").selected_text(name(before.as_deref())).show_ui(ui, |ui| {
+                for option in [None, Some("zh".to_string()), Some("en".to_string())] {
+                    let label = name(option.as_deref());
+                    ui.selectable_value(&mut self.settings.language, option, label);
+                }
+            });
+            if self.settings.language != before {
+                apply_language(&self.settings);
+            }
+        });
     }
 
     /// Runs Virtual Display Driver work off the UI thread, logging progress.
     fn run_vdd_task(
         &self,
-        what: &'static str,
+        what: String,
         task: impl FnOnce(&mut dyn FnMut(String)) -> Result<(), padbridge_host::BoxError> + Send + 'static,
     ) {
         let (busy, changed, log, ctx) =
@@ -638,8 +889,8 @@ impl PadBridgeApp {
                 ctx.request_repaint();
             };
             match task(&mut progress) {
-                Ok(()) => progress(format!("{what}：完成")),
-                Err(e) => progress(format!("{what}失敗：{e}")),
+                Ok(()) => progress(tr!("{what}：完成", "{what}: done")),
+                Err(e) => progress(tr!("{what}失敗：{e}", "{what} failed: {e}")),
             }
             busy.store(false, Ordering::Relaxed);
             changed.store(true, Ordering::Relaxed);
@@ -667,7 +918,7 @@ impl PadBridgeApp {
                 }
                 self.monitors = monitors;
             }
-            Err(e) => self.push_log(format!("無法列出螢幕：{e}")),
+            Err(e) => self.push_log(tr!("無法列出螢幕：{e}", "Could not list monitors: {e}")),
         }
     }
 
@@ -680,44 +931,54 @@ impl PadBridgeApp {
         }
     }
 
-    fn start_display(&mut self, title: String, transport: Transport, port: u16) {
-        self.start_display_with(title, transport, port, true);
+    fn start_display(&mut self, target: Target) {
+        self.start_display_with(target, true);
     }
 
     /// With `allow_refit`, a Virtual Display Driver monitor whose size differs
     /// from the iPad's is switched to the iPad's resolution and the session restarted.
-    fn start_display_with(&mut self, title: String, transport: Transport, port: u16, allow_refit: bool) {
+    fn start_display_with(&mut self, target: Target, allow_refit: bool) {
         self.stop_sessions();
         let settings = DisplaySettings {
             monitor: self.monitor_index,
             allow_input: self.allow_input,
             encoder: self.encoder_choice,
-            ..DisplaySettings::default()
+            max_width: self.settings.max_width,
+            bitrate_kbps: self.settings.bitrate_kbps,
+            max_fps: self.settings.max_fps,
         };
         let selected = self.monitors.iter().find(|m| m.index == self.monitor_index);
         let monitor = selected.map(|m| m.label()).unwrap_or_default();
         let fit_target = selected
             .filter(|m| allow_refit && m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display Driver")))
             .map(|m| (m.device_name.clone(), (m.width, m.height)));
-        self.push_log(format!("延伸螢幕：{monitor} → {title}"));
+        if target.attempt == 0 {
+            self.push_log(tr!("延伸螢幕：{monitor} → {}", "Extending: {monitor} → {}", target.title));
+        }
         let shared = Arc::new(Mutex::new(DisplayShared::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (worker_shared, worker_stop, ctx, log) = (shared.clone(), stop.clone(), self.ctx.clone(), self.log_tx.clone());
-        let worker_transport = transport.clone();
+        let (transport, port, quiet) = (target.transport.clone(), target.port, target.attempt > 0);
         let opener = self.opener();
         thread::spawn(move || {
-            let transport = worker_transport;
             let mut refit = None;
             let stream = match opener.open(&transport, port) {
                 Ok(s) => s,
                 Err(e) => {
-                    let reason = format!("連線失敗：{e}");
-                    let _ = log.send(format!("延伸螢幕結束：{reason}"));
-                    worker_shared.lock().unwrap().ended = Some(reason);
+                    let reason = tr!("連線失敗：{e}", "Connection failed: {e}");
+                    if !quiet {
+                        let _ = log.send(tr!("延伸螢幕結束：{reason}", "Extend ended: {reason}"));
+                    }
+                    let mut s = worker_shared.lock().unwrap();
+                    s.lost = is_retryable(&e);
+                    s.ended = Some(reason);
                     ctx.request_repaint();
                     return;
                 }
             };
+            if quiet {
+                let _ = log.send(tr!("已重新連線", "Reconnected"));
+            }
             run_display(stream, &host_name(), settings, &worker_stop, |event| {
                 let mut s = worker_shared.lock().unwrap();
                 match event {
@@ -732,19 +993,20 @@ impl PadBridgeApp {
                         }
                     }
                     DisplayEvent::Streaming { monitor, width, height, encoder } => {
-                        s.streaming = Some(format!("{monitor}\n傳送解析度 {width}×{height} · {encoder}"));
+                        s.streaming = Some(tr!("{monitor}\n傳送解析度 {width}×{height} · {encoder}", "{monitor}\nSending {width}×{height} · {encoder}"));
                     }
                     DisplayEvent::Stats { fps, kbps, encode_ms } => {
-                        s.stats = Some(format!("{fps:.0} fps · {:.1} Mbps · 編碼 {encode_ms:.1} ms", kbps / 1000.0));
+                        s.stats = Some(tr!("{fps:.0} fps · {:.1} Mbps · 編碼 {encode_ms:.1} ms", "{fps:.0} fps · {:.1} Mbps · encode {encode_ms:.1} ms", kbps / 1000.0));
                     }
                     DisplayEvent::Log(text) => {
                         let _ = log.send(format!("[iPad] {text}"));
                     }
-                    DisplayEvent::Ended(reason) if refit.is_none() => {
-                        let _ = log.send(format!("延伸螢幕結束：{reason}"));
+                    DisplayEvent::Ended { reason, lost } if refit.is_none() => {
+                        let _ = log.send(tr!("延伸螢幕結束：{reason}", "Extend ended: {reason}"));
+                        s.lost = lost;
                         s.ended = Some(reason);
                     }
-                    DisplayEvent::Ended(_) => {}
+                    DisplayEvent::Ended { .. } => {}
                 }
                 ctx.request_repaint();
             });
@@ -753,16 +1015,16 @@ impl PadBridgeApp {
                     let _ = log.send(line);
                     ctx.request_repaint();
                 };
-                progress(format!("把虛擬螢幕調成 iPad 的解析度 {width}×{height}…"));
+                progress(tr!("把虛擬螢幕調成 iPad 的解析度 {width}×{height}…", "Setting the virtual display to the iPad's {width}×{height}…"));
                 if let Err(e) = vdd::fit_monitor(&device, width, height, &mut progress) {
-                    progress(format!("無法調整虛擬螢幕解析度：{e}；以目前解析度繼續"));
+                    progress(tr!("無法調整虛擬螢幕解析度：{e}；以目前解析度繼續", "Could not change the virtual display's resolution: {e}; continuing as is"));
                 }
                 // Reconnect either way; the restarted session doesn't try again.
                 worker_shared.lock().unwrap().restart = true;
                 ctx.request_repaint();
             }
         });
-        self.display = Some(DisplayView { title, transport, port, shared, stop });
+        self.display = Some(DisplayView { target, retry_at: None, shared, stop });
     }
 
     fn display_view(&mut self, ui: &mut egui::Ui) {
@@ -770,9 +1032,9 @@ impl PadBridgeApp {
         let s = view.shared.lock().unwrap();
         let mut stop = false;
         ui.horizontal(|ui| {
-            ui.heading(format!("🖥 {}", s.peer_name.as_deref().unwrap_or(&view.title)));
+            ui.heading(format!("🖥 {}", s.peer_name.as_deref().unwrap_or(&view.target.title)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                stop = ui.button(if s.ended.is_some() { "關閉" } else { "⏹ 停止" }).clicked();
+                stop = ui.button(if s.ended.is_some() { tr!("關閉", "Close") } else { tr!("⏹ 停止", "⏹ Stop") }).clicked();
             });
         });
         ui.separator();
@@ -781,13 +1043,17 @@ impl PadBridgeApp {
             match &s.ended {
                 Some(reason) => {
                     ui.label(RichText::new(reason).color(ui.visuals().warn_fg_color).size(16.0));
+                    if let Some(at) = view.retry_at {
+                        ui.add_space(8.0);
+                        ui.label(retry_text(at));
+                    }
                 }
                 None if s.streaming.is_none() => {
                     ui.spinner();
-                    ui.label("連線中…");
+                    ui.label(connecting_text(view.target.attempt));
                 }
                 None => {
-                    ui.label(RichText::new("正在把螢幕顯示在 iPad 上").size(18.0));
+                    ui.label(RichText::new(tr!("正在把螢幕顯示在 iPad 上", "Showing the monitor on the iPad")).size(18.0));
                 }
             }
             ui.add_space(12.0);
@@ -826,23 +1092,28 @@ impl PadBridgeApp {
 
         let mut stop = false;
         ui.horizontal(|ui| {
-            ui.heading(peer.as_deref().unwrap_or(&view.title));
+            ui.heading(peer.as_deref().unwrap_or(&view.target.title));
             if let Some(info) = &info {
                 ui.label(RichText::new(info).weak());
             }
             if ended.is_none() && view.texture.is_some() {
-                ui.label(RichText::new(format!("顯示 {:.0} fps", view.fps)).weak());
+                ui.label(RichText::new(tr!("顯示 {:.0} fps", "showing {:.0} fps", view.fps)).weak());
                 if let Some(link) = &link {
                     ui.label(RichText::new(link).weak())
-                        .on_hover_text("iPad 實際送來的畫格數與流量，以及每格解碼所花的時間");
+                        .on_hover_text(tr!("iPad 實際送來的畫格數與流量，以及每格解碼所花的時間", "Frames and data the iPad actually sends, and decode time per frame"));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                stop = ui.button(if ended.is_some() { "關閉" } else { "⏹ 停止" }).clicked();
+                stop = ui.button(if ended.is_some() { tr!("關閉", "Close") } else { tr!("⏹ 停止", "⏹ Stop") }).clicked();
             });
         });
         if let Some(reason) = &ended {
-            ui.label(RichText::new(reason).color(ui.visuals().warn_fg_color));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(reason).color(ui.visuals().warn_fg_color));
+                if let Some(at) = view.retry_at {
+                    ui.label(retry_text(at));
+                }
+            });
         }
         ui.separator();
 
@@ -856,8 +1127,10 @@ impl PadBridgeApp {
                 });
             }
             None if ended.is_none() => {
-                ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.4);
                     ui.spinner();
+                    ui.label(connecting_text(view.target.attempt));
                 });
             }
             None => {}
@@ -884,12 +1157,13 @@ impl eframe::App for PadBridgeApp {
         // Discovery events arrive on background threads without waking the UI.
         ui.ctx().request_repaint_after(Duration::from_millis(500));
         self.pairing_dialog(&ui.ctx().clone());
+        self.persist_settings();
 
         egui::Panel::left("devices").resizable(true).default_size(290.0).min_size(230.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.device_list(ui));
         });
         egui::Panel::bottom("log").resizable(true).default_size(130.0).min_size(60.0).show(ui, |ui| {
-            ui.label(RichText::new("事件").strong());
+            ui.label(RichText::new(tr!("事件", "Events")).strong());
             self.log_panel(ui);
         });
         egui::CentralPanel::default().show(ui, |ui| {
@@ -906,18 +1180,47 @@ impl eframe::App for PadBridgeApp {
     }
 }
 
+/// Whether a failed connection is worth retrying: not when someone declined
+/// pairing or the other side runs an incompatible version.
+fn is_retryable(error: &padbridge_host::BoxError) -> bool {
+    use padbridge_host::secure::SecureError;
+    !matches!(
+        error.downcast_ref::<SecureError>(),
+        Some(SecureError::Refused(_) | SecureError::DeclinedHere | SecureError::BadMagic)
+    )
+}
+
+fn apply_language(settings: &Settings) {
+    padbridge_host::i18n::set_english(match settings.language.as_deref() {
+        Some("zh") => false,
+        Some("en") => true,
+        _ => padbridge_host::i18n::system_prefers_english(),
+    });
+}
+
+fn connecting_text(attempt: u32) -> String {
+    if attempt == 0 { tr!("連線中…", "Connecting…") } else { tr!("重新連線中（第 {attempt} 次）…", "Reconnecting (attempt {attempt})…") }
+}
+
+fn retry_text(at: Instant) -> String {
+    let secs = at.saturating_duration_since(Instant::now()).as_secs_f32().ceil();
+    tr!("{secs:.0} 秒後自動重新連線（按「關閉」取消）", "Reconnecting in {secs:.0} s (Close to cancel)")
+}
+
 fn welcome(ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.25);
         ui.heading("PadBridge");
         ui.add_space(8.0);
-        ui.label("iPad 與 Windows 畫面共享，USB 與 Wi-Fi 皆可");
+        ui.label(tr!("iPad 與 Windows 畫面共享，USB 與 Wi-Fi 皆可", "iPad and Windows screen sharing over USB or Wi-Fi"));
         ui.add_space(16.0);
-        ui.label(RichText::new(
-            "鏡像 iPad 畫面：\n\
-             1. 在 iPad 開啟 PadBridge App，按廣播按鈕並選「PadBridge Mirror」\n\
-             2. 在左側裝置清單按「📺 鏡像」",
-        ).weak());
+        ui.label(
+            RichText::new(tr!(
+                "鏡像 iPad 畫面：\n1. 在 iPad 開啟 PadBridge App，按廣播按鈕並選「PadBridge Mirror」\n2. 在左側裝置清單按「📺 鏡像」",
+                "To mirror the iPad:\n1. In the PadBridge app on the iPad, start a broadcast and choose PadBridge Mirror\n2. Choose 📺 Mirror in the device list on the left"
+            ))
+            .weak(),
+        );
     });
 }
 

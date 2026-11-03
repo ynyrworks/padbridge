@@ -218,7 +218,7 @@ impl HardwareEncoder {
             while self.need_input == 0 {
                 if !self.pump_event(&mut messages)? {
                     if Instant::now() > deadline {
-                        return Err("硬體編碼器沒有回應".into());
+                        return Err(tr!("硬體編碼器沒有回應", "The hardware encoder stopped responding").into());
                     }
                     std::thread::sleep(Duration::from_micros(200));
                 }
@@ -430,7 +430,7 @@ unsafe fn activate_encoder(gpu: Option<GpuId>) -> Result<(IMFTransform, String),
     CoTaskMemFree(Some(activates as *const _));
     // Same GPU first; encoders that don't say which GPU they belong to stay in order.
     list.sort_by_key(|a| a.as_ref().and_then(|a| activate_luid(a)).is_some_and(|luid| Some(luid) != gpu));
-    let mut last_error: BoxError = "找不到硬體 H.264 編碼器".into();
+    let mut last_error: BoxError = tr!("找不到硬體 H.264 編碼器", "No hardware H.264 encoder found").into();
     for activate in list.into_iter().flatten() {
         let name = friendly_name(&activate).unwrap_or_else(|| "Hardware H.264 encoder".into());
         match activate.ActivateObject::<IMFTransform>() {

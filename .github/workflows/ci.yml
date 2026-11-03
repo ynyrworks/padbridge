@@ -24,6 +24,17 @@ jobs:
           Copy-Item target/release/PadBridge.exe, target/release/padbridge-cli.exe, LICENSE, THIRD_PARTY_NOTICES.md dist/
           Copy-Item -Recurse licenses dist/licenses
 
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y | Out-Null }
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq 'padbridge-app' | Select-Object -ExpandProperty version
+          & $iscc /Q "/DAppVersion=$version" installer\PadBridge.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem dist\*-setup.exe
+
       - uses: actions/upload-artifact@v5
         with:
           name: PadBridge-windows

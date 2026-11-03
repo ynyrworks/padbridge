@@ -74,7 +74,7 @@ impl Discovery {
                 Some(daemon)
             }
             Err(e) => {
-                let _ = tx.send(DiscoveryEvent::Status { source: "Wi-Fi", message: format!("Bonjour 無法啟動：{e}") });
+                let _ = tx.send(DiscoveryEvent::Status { source: "Wi-Fi", message: tr!("Bonjour 無法啟動：{e}", "Bonjour could not start: {e}") });
                 None
             }
         };
@@ -95,15 +95,16 @@ fn instance_name(fullname: &str) -> String {
     fullname.strip_suffix(&format!(".{SERVICE_TYPE}")).unwrap_or(fullname).replace("\\032", " ")
 }
 
-fn usb_key(device_id: u64) -> String {
-    format!("usb:{device_id}")
+/// By serial (UDID), which survives unplugging; usbmux device ids don't.
+fn usb_key(serial: &str) -> String {
+    format!("usb:{serial}")
 }
 
 /// Follows usbmux attach/detach events, reconnecting if the service restarts.
 fn spawn_usb(tx: Sender<DiscoveryEvent>) {
     thread::spawn(move || {
         let mut last_status = String::new();
-        let mut attached: Vec<u64> = Vec::new();
+        let mut attached: Vec<(u64, String)> = Vec::new();
         loop {
             let status = match Usbmux::new().listen() {
                 Ok(events) => {
@@ -114,10 +115,10 @@ fn spawn_usb(tx: Sender<DiscoveryEvent>) {
                     for event in events {
                         let msg = match event {
                             Ok(DeviceEvent::Attached(d)) if d.connection == ConnectionType::Usb => {
-                                attached.push(d.device_id);
+                                attached.push((d.device_id, d.serial.clone()));
                                 let short = d.serial.get(..8).unwrap_or(&d.serial);
                                 DiscoveryEvent::Added(Endpoint {
-                                    key: usb_key(d.device_id),
+                                    key: usb_key(&d.serial),
                                     name: format!("iPad ({short}…)"),
                                     transport: Transport::Usb { device_id: d.device_id },
                                     port: None,
@@ -125,8 +126,9 @@ fn spawn_usb(tx: Sender<DiscoveryEvent>) {
                                 })
                             }
                             Ok(DeviceEvent::Detached { device_id }) => {
-                                attached.retain(|&id| id != device_id);
-                                DiscoveryEvent::Removed { key: usb_key(device_id) }
+                                let Some(i) = attached.iter().position(|(id, _)| *id == device_id) else { continue };
+                                let (_, serial) = attached.remove(i);
+                                DiscoveryEvent::Removed { key: usb_key(&serial) }
                             }
                             Ok(_) => continue,
                             Err(_) => break,
@@ -135,13 +137,13 @@ fn spawn_usb(tx: Sender<DiscoveryEvent>) {
                             return;
                         }
                     }
-                    "與 Apple Mobile Device Service 的連線中斷".to_string()
+                    tr!("與 Apple Mobile Device Service 的連線中斷", "Lost the connection to Apple Mobile Device Service")
                 }
-                Err(e) => format!("無法使用 USB：{e}（需要「Apple 裝置」App 或 iTunes）"),
+                Err(e) => tr!("無法使用 USB：{e}（需要「Apple 裝置」App 或 iTunes）", "USB unavailable: {e} (needs the Apple Devices app or iTunes)"),
             };
             // The listen stream ended: whatever was attached is no longer known.
-            for id in attached.drain(..) {
-                if tx.send(DiscoveryEvent::Removed { key: usb_key(id) }).is_err() {
+            for (_, serial) in attached.drain(..) {
+                if tx.send(DiscoveryEvent::Removed { key: usb_key(&serial) }).is_err() {
                     return;
                 }
             }

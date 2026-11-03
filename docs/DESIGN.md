@@ -1,6 +1,6 @@
 # PadBridge 架構設計
 
-> 狀態：v0.1.0（2026-11-03），M0–M5 完成並在實機驗證・授權：MIT
+> 狀態：v0.4.0（2026-11-03）・授權：MIT
 
 PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（Wi‑Fi / 區網）都走同一套協定：
 
@@ -53,6 +53,32 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 | 47800 | iPad 主 App | Display 模式 |
 | 47801 | iPad 廣播擴充 | Mirror 模式 |
 
+### 2.4 加密與配對（`secure.rs` / `Secure.swift`）
+
+TCP 連上後、任何協定訊息之前，雙方先做握手。每一方都有一把長期的 X25519 身分金鑰。
+
+```
+hello（雙方，明文）：  "PBS1" · 身分公鑰 (32) · 臨時公鑰 (32)
+transcript h = SHA-256("padbridge-secure-v1" · S_host · E_host · S_ipad · E_ipad)
+secret       = DH(e_host, E_ipad) · DH(s_host, E_ipad) · DH(e_host, S_ipad)
+keys         = HKDF-SHA256(salt h, secret, "padbridge-secure-v1 keys") → host→iPad (32) · iPad→host (32)
+code         = SHA-256(h · "padbridge-secure-v1 code") 前 4 bytes（BE）mod 10^6
+record       = 長度 u32 LE · ChaCha20-Poly1305(key, nonce = 0u32 · counter u64 LE, plaintext)
+```
+
+- 握手後第一個 record 雙方各送 intro（`0x01` · 名稱），iPad 接著送 verdict（`0x02` · 0 允許／1 使用者拒絕／2 此端點無法配對）。之後的 record 承載一般協定訊框（每個訊框一個 record）。
+- 兩個「靜態 × 臨時」DH 項讓只有持有身分私鑰的一方能算出金鑰；已知金鑰無法被冒用。
+- 新裝置要兩邊的使用者都確認同一組 6 位數字才配對（數字比對，被中間人攻擊的機率是百萬分之一）。之後雙方記住對方的公鑰，不再詢問。
+- 存放：Windows 在 `%APPDATA%\PadBridge`（`identity.key` 以 DPAPI 加密、`paired.json`）；iPad 在 App Group 容器的 `pairing.json`。App Group 名稱從簽章後的 `embedded.mobileprovision` 讀取，因為重簽工具可能改名。
+- 廣播擴充沒有 UI，不能配對，只接受 App 配對過的電腦。未簽章的 CI 建置會用 ad-hoc 簽章寫入 App Group entitlement，讓 Sideloadly 能保留它。
+- Rust 與 Swift 共用一組固定金鑰的測試向量（`secure::tests::test_vectors` / `SecureTests.testVectorsMatchRust`），確保兩邊逐位元組一致。
+
+### 2.5 重新連線
+
+- `DisplayEvent::Ended` / `MirrorEvent::Ended` 帶 `lost`：連線中斷（socket 錯誤、對方關閉、廣播結束）為 true；使用者停止、擷取／編碼錯誤、配對被拒為 false。
+- App 對 `lost` 的工作階段每 2～10 秒重試，USB 裝置以序號（UDID）辨識，所以重新插上後 usbmux id 改變也找得到。
+- iPad App 回到前景時，若監聽已失效就重新啟動。
+
 ## 3. 線路協定（`crates/protocol`）
 
 所有整數皆為 **little-endian**，浮點數為 IEEE‑754 `f32` LE。
@@ -64,7 +90,7 @@ PadBridge 讓 iPad 與 Windows 雙向共享畫面，有線（USB）與無線（W
 
 | kind | 訊息 | body |
 |---|---|---|
-| 0x01 | Hello | magic `"PDBR"`(4) · version u16 · role u8 · name str |
+| 0x01 | Hello | magic `"PDBR"`(4) · version u16（目前 2）· role u8 · name str |
 | 0x02 | DisplayInfo | width_px u32 · height_px u32 · scale_milli u16 · max_fps u16 · codecs u8(bitmask) |
 | 0x03 | StreamConfig | codec u8 · width u32 · height u32 · fps u16 · bitrate_kbps u32 |
 | 0x10 | CodecParams | codec u8 · 參數集（每個 NAL 前置 u32 **big-endian** 長度）至訊框結尾 |
@@ -234,9 +260,12 @@ padbridge/
 │  │   ├─ mirror / hwdec              # 軟硬體解碼（Mirror）
 │  │   ├─ gpu                         # GPU 列表與裝置
 │  │   ├─ vdisplay / vdd              # 虛擬螢幕偵測與 VDD 整合
+│  │   ├─ secure / pairing            # 加密握手、配對與金鑰存放
+│  │   ├─ i18n                        # 中文／英文（tr! 巨集）
 │  │   └─ input / discovery / target  # 觸控注入、探索、連線
 │  ├─ cli/                    # 命令列 padbridge-cli
-│  └─ app/                    # Windows 桌面 App PadBridge.exe（egui）
+│  └─ app/                    # Windows 桌面 App PadBridge.exe（egui），settings.json 保存設定
+├─ installer/                 # Inno Setup 安裝程式腳本
 ├─ ios/                       # Swift / XcodeGen       (M2+)
 │  ├─ project.yml
 │  ├─ App/
@@ -258,6 +287,14 @@ padbridge/
 | **M6** | 系統匣 UI、自動重連、120 Hz、HEVC、參數調整 | — |
 
 M0–M5 皆已完成，並於 2026-11-03 在實機（iPad、Windows 11、USB 與 Wi‑Fi）驗證；另外完成硬體解碼、GPU 選擇與 VDD 整合。
+
+邁向 1.0：
+
+| 版本 | 內容 |
+|---|---|
+| 0.2 | 配對與加密、設定保存 |
+| 0.3 | 自動重新連線、iPad 回到前景時重啟監聽 |
+| 0.4 | 執行檔版本資訊、英文介面、可調畫質、安裝程式、程式碼簽章政策與隱私說明 |
 
 ## 8. 風險
 

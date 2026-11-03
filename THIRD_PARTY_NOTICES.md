@@ -35,7 +35,8 @@ PadBridge.exe 內含 egui 的預設字型：
 [BSL-1.0](licenses/BSL-1.0-error-code.txt) ·
 [Zlib](licenses/Zlib-foldhash.txt) ·
 [ISC](licenses/ISC-libloading.txt) ·
-[BSD-2-Clause](licenses/OpenH264-BSD-2-Clause.txt)（條款相同，著作權人依各 crate）。
+[BSD-2-Clause](licenses/OpenH264-BSD-2-Clause.txt)（條款相同，著作權人依各 crate）·
+BSD-3-Clause：[x25519-dalek](licenses/BSD-3-Clause-x25519-dalek.txt)、[curve25519-dalek](licenses/BSD-3-Clause-curve25519-dalek.txt)、[subtle](licenses/BSD-3-Clause-subtle.txt)（加密連線用）。
 `hexf-parse` 為 CC0-1.0（公有領域貢獻），不需要附上聲明。
 
 | Crate | 版本 | 授權 | 來源 |
@@ -45,6 +46,7 @@ PadBridge.exe 內含 egui 的預設字型：
 | accesskit_windows | 0.32.1 | MIT OR Apache-2.0 | <https://github.com/AccessKit/accesskit> |
 | accesskit_winit | 0.32.2 | Apache-2.0 | <https://github.com/AccessKit/accesskit> |
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | <https://github.com/oyvindln/adler2> |
+| aead | 0.5.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | ahash | 0.8.12 | MIT OR Apache-2.0 | <https://github.com/tkaitchuck/ahash> |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | <https://github.com/zakarumych/allocator-api2> |
 | arboard | 3.7.0 | MIT OR Apache-2.0 | <https://github.com/1Password/arboard> |
@@ -55,18 +57,27 @@ PadBridge.exe 內含 egui 的預設字型：
 | bit-set | 0.9.1 | Apache-2.0 OR MIT | <https://github.com/contain-rs/bit-set> |
 | bit-vec | 0.9.1 | Apache-2.0 OR MIT | <https://github.com/contain-rs/bit-vec> |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | <https://github.com/bitflags/bitflags> |
+| block-buffer | 0.10.4 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | <https://github.com/Lokathor/bytemuck> |
 | bytemuck_derive | 1.12.1 | Zlib OR Apache-2.0 OR MIT | <https://github.com/Lokathor/bytemuck> |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | <https://github.com/image-rs/byteorder-lite> |
 | cc | 1.11.0 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cc-rs> |
 | cfg_aliases | 0.2.2 | MIT | <https://github.com/katharostech/cfg_aliases> |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cfg-if> |
+| chacha20 | 0.9.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/stream-ciphers> |
+| chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/AEADs/tree/master/chacha20poly1305> |
+| cipher | 0.4.4 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | clipboard-win | 5.4.3 | BSL-1.0 | <https://github.com/DoumanAsh/clipboard-win> |
 | codespan-reporting | 0.13.1 | Apache-2.0 | <https://github.com/brendanzab/codespan> |
 | color | 0.3.3 | Apache-2.0 OR MIT | <https://github.com/linebender/color> |
+| cpufeatures | 0.2.17 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | crc32fast | 1.5.4 | MIT OR Apache-2.0 | <https://github.com/srijs/rust-crc32fast> |
+| crypto-common | 0.1.7 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | cursor-icon | 1.2.0 | MIT OR Apache-2.0 OR Zlib | <https://github.com/rust-windowing/cursor-icon> |
+| curve25519-dalek | 4.1.3 | BSD-3-Clause | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek> |
+| curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | <https://github.com/dalek-cryptography/curve25519-dalek> |
 | deranged | 0.5.9 | MIT OR Apache-2.0 | <https://github.com/jhpratt/deranged> |
+| digest | 0.10.7 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 | <https://github.com/yaahc/displaydoc> |
 | document-features | 0.2.12 | MIT OR Apache-2.0 | <https://github.com/slint-ui/document-features> |
 | dpi | 0.1.2 | Apache-2.0 AND MIT | <https://github.com/rust-windowing/winit> |
@@ -94,6 +105,9 @@ PadBridge.exe 內含 egui 的預設字型：
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 | <https://github.com/rust-lang/futures-rs> |
 | futures-sink | 0.3.34 | MIT OR Apache-2.0 | <https://github.com/rust-lang/futures-rs> |
+| generic-array | 0.14.7 | MIT | <https://github.com/fizyk20/generic-array.git> |
+| getrandom | 0.2.17 | MIT OR Apache-2.0 | <https://github.com/rust-random/getrandom> |
+| getrandom | 0.3.4 | MIT OR Apache-2.0 | <https://github.com/rust-random/getrandom> |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | <https://github.com/rust-random/getrandom> |
 | gl_generator | 0.14.0 | Apache-2.0 | <https://github.com/brendanzab/gl-rs/> |
 | glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib | <https://github.com/grovesNL/glow> |
@@ -108,6 +122,8 @@ PadBridge.exe 內含 egui 的預設字型：
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | <https://github.com/rust-lang/hashbrown> |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | <https://github.com/rust-lang/hashbrown> |
 | hexf-parse | 0.2.1 | CC0-1.0 | <https://github.com/lifthrasiir/hexf> |
+| hkdf | 0.12.4 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/KDFs/> |
+| hmac | 0.12.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/MACs> |
 | icu_collections | 2.4.0 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | icu_locale_core | 2.4.0 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | icu_normalizer | 2.4.0 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
@@ -120,7 +136,9 @@ PadBridge.exe 內含 egui 的預設字型：
 | if-addrs | 0.15.0 | MIT OR BSD-3-Clause | <https://github.com/messense/if-addrs> |
 | image | 0.25.10 | MIT OR Apache-2.0 | <https://github.com/image-rs/image> |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | <https://github.com/indexmap-rs/indexmap> |
+| inout | 0.1.4 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | itertools | 0.14.0 | MIT OR Apache-2.0 | <https://github.com/rust-itertools/itertools> |
+| itoa | 1.0.18 | MIT OR Apache-2.0 | <https://github.com/dtolnay/itoa> |
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | <https://github.com/rust-lang/jobserver-rs> |
 | khronos_api | 3.1.0 | Apache-2.0 | <https://github.com/brendanzab/gl-rs/> |
 | khronos-egl | 6.0.0 | MIT/Apache-2.0 | <https://github.com/timothee-haudebourg/khronos-egl> |
@@ -146,6 +164,7 @@ PadBridge.exe 內含 egui 的預設字型：
 | num-conv | 0.2.2 | MIT OR Apache-2.0 | <https://github.com/jhpratt/num-conv> |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | <https://github.com/rust-num/num-traits> |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 | <https://github.com/matklad/once_cell> |
+| opaque-debug | 0.3.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | openh264 | 0.9.9 | BSD-2-Clause | <https://github.com/ralfbiedert/openh264-rs> |
 | openh264-sys2 | 0.9.9 | BSD-2-Clause | <https://github.com/ralfbiedert/openh264-rs> |
 | ordered-float | 5.5.1 | MIT | <https://github.com/reem/rust-ordered-float> |
@@ -157,6 +176,7 @@ PadBridge.exe 內含 egui 的預設字型：
 | plist | 1.10.3 | MIT | <https://github.com/ebarnard/rust-plist/> |
 | png | 0.18.1 | MIT OR Apache-2.0 | <https://github.com/image-rs/image-png> |
 | pollster | 0.4.0 | Apache-2.0/MIT | <https://github.com/zesterer/pollster> |
+| poly1305 | 0.8.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/universal-hashes> |
 | polycool | 0.4.0 | MIT OR Apache-2.0 | <https://github.com/linebender/kurbo> |
 | potential_utf | 0.1.6 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | powerfmt | 0.2.1 | MIT OR Apache-2.0 | <https://github.com/jhpratt/powerfmt> |
@@ -166,18 +186,25 @@ PadBridge.exe 內含 egui 的預設字型：
 | pxfm | 0.1.30 | BSD-3-Clause OR Apache-2.0 | <https://github.com/awxkee/pxfm> |
 | quick-xml | 0.42.0 | MIT | <https://github.com/tafia/quick-xml> |
 | quote | 1.0.47 | MIT OR Apache-2.0 | <https://github.com/dtolnay/quote> |
+| rand_core | 0.6.4 | MIT OR Apache-2.0 | <https://github.com/rust-random/rand> |
 | range-alloc | 0.1.5 | MIT OR Apache-2.0 | <https://github.com/gfx-rs/range-alloc> |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | <https://github.com/rust-windowing/raw-window-handle> |
 | read-fonts | 0.39.2 | MIT OR Apache-2.0 | <https://github.com/googlefonts/fontations> |
 | renderdoc-sys | 1.1.0 | MIT OR Apache-2.0 | <https://github.com/ebkalderon/renderdoc-rs> |
+| rustc_version | 0.4.1 | MIT OR Apache-2.0 | <https://github.com/djc/rustc-version-rs> |
 | rustc-hash | 1.1.0 | Apache-2.0/MIT | <https://github.com/rust-lang-nursery/rustc-hash> |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | <https://github.com/rust-lang/rustc-hash> |
 | safe_arch | 1.2.0 | Zlib OR Apache-2.0 OR MIT | <https://github.com/Lokathor/safe_arch> |
 | same-file | 1.0.6 | Unlicense/MIT | <https://github.com/BurntSushi/same-file> |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | <https://github.com/bluss/scopeguard> |
 | self_cell | 1.3.0 | Apache-2.0 OR GPL-2.0-only | <https://github.com/Voultapher/self_cell> |
+| semver | 1.0.28 | MIT OR Apache-2.0 | <https://github.com/dtolnay/semver> |
 | serde | 1.0.229 | MIT OR Apache-2.0 | <https://github.com/serde-rs/serde> |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | <https://github.com/serde-rs/serde> |
+| serde_derive | 1.0.229 | MIT OR Apache-2.0 | <https://github.com/serde-rs/serde> |
+| serde_json | 1.0.154 | MIT OR Apache-2.0 | <https://github.com/serde-rs/json> |
+| serde_spanned | 1.1.2 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
+| sha2 | 0.10.9 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | <https://github.com/comex/rust-shlex> |
 | simd-adler32 | 0.3.10 | MIT | <https://github.com/mcountryman/simd-adler32> |
 | skrifa | 0.42.1 | MIT OR Apache-2.0 | <https://github.com/googlefonts/fontations> |
@@ -189,6 +216,7 @@ PadBridge.exe 內含 egui 的預設字型：
 | spirv | 0.4.0+sdk-1.4.341.0 | Apache-2.0 | <https://github.com/gfx-rs/rspirv> |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | <https://github.com/storyyeller/stable_deref_trait> |
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | <https://github.com/nvzqz/static-assertions-rs> |
+| subtle | 2.6.1 | BSD-3-Clause | <https://github.com/dalek-cryptography/subtle> |
 | syn | 2.0.119 | MIT OR Apache-2.0 | <https://github.com/dtolnay/syn> |
 | syn | 3.0.9 | MIT OR Apache-2.0 | <https://github.com/dtolnay/syn> |
 | synstructure | 0.14.0 | MIT | <https://github.com/mystor/synstructure> |
@@ -197,13 +225,18 @@ PadBridge.exe 內含 egui 的預設字型：
 | time | 0.3.55 | MIT OR Apache-2.0 | <https://github.com/time-rs/time> |
 | time-core | 0.1.9 | MIT OR Apache-2.0 | <https://github.com/time-rs/time> |
 | tinystr | 0.8.5 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
+| toml | 1.1.8+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
+| toml_datetime | 1.1.2+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
+| toml_parser | 1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
 | tracing | 0.1.44 | MIT | <https://github.com/tokio-rs/tracing> |
 | tracing-core | 0.1.36 | MIT | <https://github.com/tokio-rs/tracing> |
 | type-map | 0.5.1 | MIT/Apache-2.0 | <https://github.com/kardeiz/type-map> |
+| typenum | 1.20.1 | MIT OR Apache-2.0 | <https://github.com/paholg/typenum> |
 | unicode-general-category | 1.1.0 | Apache-2.0 | <https://github.com/yeslogic/unicode-general-category> |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | <https://github.com/dtolnay/unicode-ident> |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | <https://github.com/unicode-rs/unicode-segmentation> |
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 | <https://github.com/unicode-rs/unicode-width> |
+| universal-hash | 0.5.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | url | 2.5.8 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
 | utf_types | 1.0.0 | Apache-2.0 OR MIT | <https://github.com/hsivonen/utf_types> |
 | utf8_iter | 1.1.0 | Apache-2.0 OR MIT | <https://github.com/hsivonen/utf8_iter> |
@@ -239,7 +272,10 @@ PadBridge.exe 內含 egui 的預設字型：
 | windows-targets | 0.52.6 | MIT OR Apache-2.0 | <https://github.com/microsoft/windows-rs> |
 | windows-threading | 0.2.1 | MIT OR Apache-2.0 | <https://github.com/microsoft/windows-rs> |
 | winit | 0.30.13 | Apache-2.0 | <https://github.com/rust-windowing/winit> |
+| winnow | 1.0.4 | MIT | <https://github.com/winnow-rs/winnow> |
+| winresource | 0.1.34 | MIT | <https://github.com/BenjaminRi/winresource> |
 | writeable | 0.6.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
+| x25519-dalek | 2.0.1 | BSD-3-Clause | <https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek> |
 | xml-rs | 0.8.29 | MIT | <https://github.com/kornelski/xml-rs> |
 | yoke | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | yoke-derive | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
@@ -247,9 +283,12 @@ PadBridge.exe 內含 egui 的預設字型：
 | zerocopy-derive | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | <https://github.com/google/zerocopy> |
 | zerofrom | 0.1.8 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | zerofrom-derive | 0.1.8 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| zeroize_derive | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | zerotrie | 0.2.5 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | zerovec | 0.11.9 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | zerovec-derive | 0.11.7 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
+| zmij | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
 
 ## 執行時使用，但不隨 PadBridge 散布
 
@@ -258,7 +297,7 @@ PadBridge.exe 內含 egui 的預設字型：
 | [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) | MIT | 讓 iPad 成為真正的延伸螢幕。PadBridge 只在使用者按下「安裝虛擬螢幕」時，透過 winget 下載它的官方控制程式；驅動由上游作者簽章與安裝。PadBridge 透過它的設定檔與 named pipe 控制解析度與螢幕數量。 |
 | Apple Mobile Device Service | Apple 專有 | 隨 iTunes 或「Apple 裝置」App 安裝，提供 USB 用的 usbmuxd。 |
 | Windows Media Foundation、Direct3D 11、DXGI | 作業系統元件 | 硬體編解碼、螢幕擷取、色彩轉換。 |
-| iPadOS 架構（Network、VideoToolbox、ReplayKit、AVFoundation） | 作業系統元件 | iPad App 只使用系統架構，沒有第三方相依。 |
+| iPadOS 架構（Network、CryptoKit、VideoToolbox、ReplayKit、AVFoundation） | 作業系統元件 | iPad App 只使用系統架構，沒有第三方相依。 |
 
 ## 僅供參考，未使用其程式碼
 
@@ -268,4 +307,6 @@ PadBridge.exe 內含 egui 的預設字型：
 ## 開發與發布工具（不包含在產品中）
 
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)（MIT）：在 CI 產生 Xcode 專案。
+- [Inno Setup](https://jrsoftware.org/isinfo.php)（Inno Setup License，可免費用於商業用途）：在 CI 產生 Windows 安裝程式；安裝程式內含它的安裝執行環境。
+- [winresource](https://github.com/BenjaminRi/winresource)（MIT）：編譯時把版本資訊寫進執行檔。
 - [Sideloadly](https://sideloadly.io/)：使用者自行用來簽章並安裝 IPA 的第三方工具，與本專案無關聯。
