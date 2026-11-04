@@ -40,6 +40,9 @@ targets:
       path: Generated/App-Info.plist
       properties:
         CFBundleDisplayName: PadBridge
+        # XcodeGen writes 1.0 / 1 unless the plist points at the build settings.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         # Trackpad clicks arrive as indirect-pointer touches (sent to Windows as mouse input).
@@ -79,6 +82,9 @@ targets:
       path: Generated/Broadcast-Info.plist
       properties:
         CFBundleDisplayName: PadBridge Mirror
+        # Must match the app's, or iOS warns about the extension.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSLocalNetworkUsageDescription: PadBridge 需要區域網路權限，把 iPad 畫面傳送到 Windows。
         NSBonjourServices:
           - _padbridge._tcp
