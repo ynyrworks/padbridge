@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "padbridge-app"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "eframe",
  "padbridge-host",
@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "padbridge-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "minifb",
  "padbridge-host",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "padbridge-host"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.3.4",
@@ -2656,11 +2656,11 @@ dependencies = [
 
 [[package]]
 name = "padbridge-protocol"
-version = "0.4.1"
+version = "0.4.2"
 
 [[package]]
 name = "padbridge-usbmux"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "plist",
 ]
