@@ -14,7 +14,7 @@ use padbridge_host::mirror::{run_mirror, DecoderChoice, Frame, MirrorEvent};
 use padbridge_host::pairing::HostSecurity;
 use padbridge_host::secure::SecureLink;
 use padbridge_host::target::{describe_device, resolve_target};
-use padbridge_host::{host_name, ping_session, tr, BoxError, Event};
+use padbridge_host::{host_name, ping_session, tr, vdd, BoxError, Event};
 use padbridge_protocol::{DISPLAY_PORT, MIRROR_PORT};
 use padbridge_usbmux::{DeviceEvent, Usbmux};
 
@@ -28,6 +28,7 @@ const USAGE_ZH: &str = "\
   padbridge-cli gpus                        列出可用來編碼 / 解碼的 GPU
   padbridge-cli paired                      列出已配對的 iPad
   padbridge-cli unpair <金鑰開頭|名稱>       取消與某台 iPad 的配對
+  padbridge-cli vdd on|off                  開啟 / 移除 Virtual Display Driver 的虛擬螢幕
   padbridge-cli display <目標> [螢幕編號]   把 Windows 螢幕顯示在 iPad 上（預設埠 47800）
 
 <目標>：
@@ -50,6 +51,7 @@ Usage:
   padbridge-cli gpus                        list GPUs for encoding / decoding
   padbridge-cli paired                      list paired iPads
   padbridge-cli unpair <key prefix|name>    unpair an iPad
+  padbridge-cli vdd on|off                  turn the Virtual Display Driver's display on / remove it
   padbridge-cli display <target> [monitor]  show a Windows monitor on the iPad (default port 47800)
 
 <target>:
@@ -83,6 +85,14 @@ fn main() -> ExitCode {
         ["gpus"] => gpus(),
         ["paired"] => paired(),
         ["unpair", who] => unpair(who),
+        ["vdd", "on"] => vdd::enable_monitor().map(|()| {
+            println!("{}", tr!("虛擬螢幕已開啟", "Virtual display on"));
+            ExitCode::SUCCESS
+        }),
+        ["vdd", "off"] => vdd::disable_monitor().map(|count| {
+            println!("{}", tr!("已移除 {count} 個虛擬螢幕", "Removed {count} virtual display(s)"));
+            ExitCode::SUCCESS
+        }),
         ["display", target] => display(target, 0),
         ["display", target, monitor] => match monitor.parse() {
             Ok(n) => display(target, n),

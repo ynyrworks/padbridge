@@ -63,7 +63,7 @@
 2. 在控制程式按 **Install Driver**，允許系統管理員權限。驅動由上游作者簽章與安裝；公司管理的電腦可能不允許安裝驅動。
 3. 回到 PadBridge 按 🔄，選擇標示「虛擬」的螢幕。連線時 PadBridge 會把它調成 iPad 的解析度。
 
-預設「虛擬螢幕跟著 PadBridge 開關」：開啟 PadBridge 時打開虛擬螢幕，關閉時把它從桌面移除，視窗會回到實體螢幕。想讓虛擬螢幕一直開著，取消勾選即可。
+預設「虛擬螢幕跟著 PadBridge 開關」：開啟 PadBridge 時打開虛擬螢幕，關閉時把它從桌面移除，視窗會回到實體螢幕。Windows 設定的「顯示器」頁仍會列出它（顯示為已中斷連線），這是正常的。想讓虛擬螢幕一直開著，取消勾選即可；也可以用 `padbridge-cli vdd on` / `vdd off` 手動開關。其他軟體（例如 DeskIn、StarDesk）的虛擬螢幕由它們自己管理，PadBridge 不會去關。
 
 以系統管理員身分執行的視窗（例如工作管理員）收不到 iPad 的觸控，這是 Windows 的安全限制。
 
@@ -133,6 +133,10 @@ padbridge-cli paired
 
 ```bash
 padbridge-cli unpair <金鑰開頭或名稱>
+```
+
+```bash
+padbridge-cli vdd off
 ```
 
 `<目標>` 可以是 `usb`、`usb:<UDID>` 或 iPad 的 IP。`PadBridge.exe --mirror usb` / `--display usb` 會在啟動後立刻開始，適合做成捷徑。命令列的語言跟隨 Windows，可用環境變數 `PADBRIDGE_LANG=en` 或 `zh` 指定。

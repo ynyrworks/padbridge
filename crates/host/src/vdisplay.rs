@@ -22,10 +22,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_XVIRTUALSCREEN};
 use windows::Win32::Devices::Display::{
-    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig, DISPLAYCONFIG_ADAPTER_NAME,
-    DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig, SetDisplayConfig,
+    DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS, SDC_ALLOW_CHANGES,
+    SDC_APPLY, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, LUID, POINTL};
 
@@ -111,29 +112,103 @@ pub fn adapter_instance_id(luid: LUID) -> Option<String> {
     (status == 0).then(|| instance_id_from_path(&utf16(&adapter.adapterDevicePath)))
 }
 
+/// The display paths (source → monitor) and modes Windows reports.
+fn query_config(flags: QUERY_DISPLAY_CONFIG_FLAGS) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), String> {
+    unsafe {
+        let (mut num_paths, mut num_modes) = (0, 0);
+        let status = GetDisplayConfigBufferSizes(flags, &mut num_paths, &mut num_modes);
+        if status != ERROR_SUCCESS {
+            return Err(tr!("GetDisplayConfigBufferSizes 回傳 {}", "GetDisplayConfigBufferSizes returned {}", status.0));
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); num_paths as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); num_modes as usize];
+        let status =
+            QueryDisplayConfig(flags, &mut num_paths, paths.as_mut_ptr(), &mut num_modes, modes.as_mut_ptr(), None);
+        if status != ERROR_SUCCESS {
+            return Err(tr!("QueryDisplayConfig 回傳 {}", "QueryDisplayConfig returned {}", status.0));
+        }
+        paths.truncate(num_paths as usize);
+        modes.truncate(num_modes as usize);
+        Ok((paths, modes))
+    }
+}
+
+fn apply_config(paths: &[DISPLAYCONFIG_PATH_INFO], modes: &[DISPLAYCONFIG_MODE_INFO]) -> Result<(), String> {
+    let flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE;
+    let status = unsafe { SetDisplayConfig(Some(paths), Some(modes), flags) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(tr!("SetDisplayConfig 回傳 {status}", "SetDisplayConfig returned {status}"))
+    }
+}
+
+/// `DISPLAYCONFIG_PATH_ACTIVE`, and the mode index meaning "let Windows choose".
+const PATH_ACTIVE: u32 = 0x1;
+const MODE_IDX_INVALID: u32 = u32::MAX;
+
+fn on_adapter(path: &DISPLAYCONFIG_PATH_INFO, instance_id: &str) -> bool {
+    adapter_instance_id(path.sourceInfo.adapterId).is_some_and(|id| id.eq_ignore_ascii_case(instance_id))
+}
+
+/// Takes the displays of one adapter off the desktop, as Settings does with
+/// "Disconnect this display"; Windows moves their windows to the remaining
+/// displays. Returns how many were taken off.
+pub fn deactivate_adapter(instance_id: &str) -> Result<usize, String> {
+    let (mut paths, modes) = query_config(QDC_ONLY_ACTIVE_PATHS)?;
+    let mut count = 0;
+    for path in paths.iter_mut().filter(|p| on_adapter(p, instance_id)) {
+        path.flags &= !PATH_ACTIVE;
+        path.sourceInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+        path.targetInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+        count += 1;
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+    if count == paths.len() {
+        return Err(tr!("它是目前唯一的螢幕", "it is the only display"));
+    }
+    apply_config(&paths, &modes)?;
+    Ok(count)
+}
+
+/// Puts one monitor of the adapter back on the desktop, extending it.
+/// Returns false if the adapter has no monitor to show.
+pub fn activate_adapter(instance_id: &str) -> Result<bool, String> {
+    let (paths, modes) = query_config(QDC_ALL_PATHS)?;
+    let mut active: Vec<_> = paths.iter().filter(|p| p.flags & PATH_ACTIVE != 0).copied().collect();
+    if active.iter().any(|p| on_adapter(p, instance_id)) {
+        return Ok(true);
+    }
+    // All source × monitor combinations are listed; pick one whose source and monitor are both free.
+    let free = |p: &&DISPLAYCONFIG_PATH_INFO| {
+        !active.iter().any(|a| {
+            (a.sourceInfo.adapterId == p.sourceInfo.adapterId && a.sourceInfo.id == p.sourceInfo.id)
+                || (a.targetInfo.adapterId == p.targetInfo.adapterId && a.targetInfo.id == p.targetInfo.id)
+        })
+    };
+    let Some(&candidate) =
+        paths.iter().filter(|p| on_adapter(p, instance_id) && p.targetInfo.targetAvailable.as_bool()).find(free)
+    else {
+        return Ok(false);
+    };
+    let mut path = candidate;
+    path.flags |= PATH_ACTIVE;
+    path.sourceInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+    path.targetInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+    active.push(path);
+    apply_config(&active, &modes)?;
+    Ok(true)
+}
+
 /// GDI device name (upper case, e.g. `\\.\DISPLAY3`) → instance id of the
 /// adapter that owns that source, for every active display.
 pub fn source_adapters() -> HashMap<String, String> {
     let mut map = HashMap::new();
+    let Ok((paths, _)) = query_config(QDC_ONLY_ACTIVE_PATHS) else { return map };
     unsafe {
-        let (mut num_paths, mut num_modes) = (0, 0);
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes) != ERROR_SUCCESS {
-            return map;
-        }
-        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); num_paths as usize];
-        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); num_modes as usize];
-        let status = QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut num_paths,
-            paths.as_mut_ptr(),
-            &mut num_modes,
-            modes.as_mut_ptr(),
-            None,
-        );
-        if status != ERROR_SUCCESS {
-            return map;
-        }
-        for path in &paths[..num_paths as usize] {
+        for path in &paths {
             let src = &path.sourceInfo;
             let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
                 header: header::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(
@@ -288,5 +363,15 @@ mod tests {
         for name in sources.keys() {
             assert!(outputs.iter().any(|o| o.device_name.eq_ignore_ascii_case(name) && o.attached), "{name}");
         }
+    }
+
+    #[test]
+    fn unknown_adapter_changes_nothing() {
+        // Reads the real configuration but must not apply anything.
+        let (active, _) = query_config(QDC_ONLY_ACTIVE_PATHS).unwrap();
+        let (all, _) = query_config(QDC_ALL_PATHS).unwrap();
+        assert!(all.len() >= active.len());
+        assert_eq!(deactivate_adapter(r"ROOT\NO_SUCH_ADAPTER\0000"), Ok(0));
+        assert_eq!(activate_adapter(r"ROOT\NO_SUCH_ADAPTER\0000"), Ok(false));
     }
 }

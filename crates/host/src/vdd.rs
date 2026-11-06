@@ -18,8 +18,11 @@ use windows::core::w;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
-use crate::capture::list_monitors;
-use crate::vdisplay::{adapter_outputs, attach, detach, set_mode, virtual_adapters, AdapterOutput, VirtualAdapter};
+use crate::capture::{list_monitors, Monitor};
+use crate::vdisplay::{
+    activate_adapter, adapter_outputs, attach, deactivate_adapter, detach, set_mode, virtual_adapters, AdapterOutput,
+    VirtualAdapter,
+};
 use crate::BoxError;
 
 pub const WINGET_ID: &str = "VirtualDrivers.Virtual-Display-Driver";
@@ -129,7 +132,13 @@ fn outputs() -> Vec<AdapterOutput> {
 
 /// Whether the driver's monitor is part of the desktop.
 pub fn monitor_on() -> Result<bool, BoxError> {
-    Ok(list_monitors()?.iter().any(|m| m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display"))))
+    Ok(list_monitors()?.iter().any(is_vdd_monitor))
+}
+
+/// Whether a monitor belongs to this driver. Other apps' adapters are named
+/// alike ("DeskIn Virtual Display Adapter"), so the name must match in full.
+pub fn is_vdd_monitor(monitor: &Monitor) -> bool {
+    monitor.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display Driver"))
 }
 
 /// Waits for the monitor, putting it back on the desktop if Windows kept it off.
@@ -139,10 +148,7 @@ fn wait_for_monitor(limit: Duration) -> Result<bool, BoxError> {
         if monitor_on()? {
             return Ok(true);
         }
-        // Outputs without a monitor refuse this; only a real one comes back.
-        for output in outputs().iter().filter(|o| !o.attached) {
-            let _ = attach(&output.device_name);
-        }
+        reattach();
         if Instant::now() >= deadline {
             return Ok(false);
         }
@@ -164,16 +170,45 @@ pub fn enable_monitor() -> Result<(), BoxError> {
     }
 }
 
-/// Takes the driver's monitor off the desktop, so windows move back to the
-/// real screens. The driver keeps it, so `enable_monitor` brings it back
-/// without a reload. (The driver treats a count of 0 as 1, so asking it for
-/// no monitors would not work.) Returns how many were taken off.
+/// Puts a monitor that `disable_monitor` took off back on the desktop.
+fn reattach() {
+    if let Some(adapter) = installed() {
+        if activate_adapter(&adapter.instance_id).unwrap_or(false) {
+            return;
+        }
+    }
+    // Older route; outputs without a monitor refuse it, so only a real one comes back.
+    for output in outputs().iter().filter(|o| !o.attached) {
+        let _ = attach(&output.device_name);
+    }
+}
+
+/// Takes the driver's monitor off the desktop, so Windows moves its windows
+/// back to the real screens. The driver keeps it, so `enable_monitor` brings
+/// it back without a reload. (The driver treats a count of 0 as 1, so asking
+/// it for no monitors would not work.) Returns how many were taken off.
 pub fn disable_monitor() -> Result<usize, BoxError> {
-    let mut count = 0;
-    for output in outputs().iter().filter(|o| o.attached) {
-        detach(&output.device_name)
-            .map_err(|e| tr!("無法關閉虛擬螢幕 {}：{e}", "Could not turn off the virtual display {}: {e}", output.device_name))?;
-        count += 1;
+    let Some(adapter) = installed() else { return Ok(0) };
+    let count = match deactivate_adapter(&adapter.instance_id) {
+        Ok(count) => count,
+        Err(first) => {
+            // Older route, in case the display configuration API refused.
+            let mut count = 0;
+            for output in outputs().iter().filter(|o| o.attached) {
+                detach(&output.device_name).map_err(|e| {
+                    tr!("無法關閉虛擬螢幕：{first}；{}：{e}", "Could not turn off the virtual display: {first}; {}: {e}", output.device_name)
+                })?;
+                count += 1;
+            }
+            count
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while monitor_on()? {
+        if Instant::now() >= deadline {
+            return Err(tr!("Windows 回報已關閉，但虛擬螢幕仍在桌面上", "Windows accepted the change, but the virtual display is still on the desktop").into());
+        }
+        thread::sleep(Duration::from_millis(200));
     }
     Ok(count)
 }

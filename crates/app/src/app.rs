@@ -233,7 +233,7 @@ impl PadBridgeApp {
         app.apply_settings();
         if app.settings.vdd_follows_app
             && app.virtual_adapters.iter().any(vdd::is_vdd)
-            && !app.monitors.iter().any(|m| m.virtual_adapter.is_some())
+            && !app.monitors.iter().any(vdd::is_vdd_monitor)
         {
             app.run_vdd_task(tr!("開啟虛擬螢幕", "Turning on the virtual display"), |_| vdd::enable_monitor());
         }
@@ -1049,7 +1049,7 @@ impl PadBridgeApp {
         let selected = self.monitors.iter().find(|m| m.index == self.monitor_index);
         let monitor = selected.map(|m| m.label()).unwrap_or_default();
         let fit_target = selected
-            .filter(|m| allow_refit && m.virtual_adapter.as_deref().is_some_and(|a| a.contains("Virtual Display Driver")))
+            .filter(|m| allow_refit && vdd::is_vdd_monitor(m))
             .map(|m| (m.device_name.clone(), (m.width, m.height)));
         if target.attempt == 0 {
             self.push_log(tr!("延伸螢幕：{monitor} → {}", "Extending: {monitor} → {}", target.title));
@@ -1278,9 +1278,12 @@ impl eframe::App for PadBridgeApp {
     fn on_exit(&mut self) {
         self.stop_sessions();
         if self.settings.vdd_follows_app && vdd::installed().is_some() {
-            if let Err(e) = vdd::disable_monitor() {
-                eprintln!("{e}");
-            }
+            // There is no window left to show this in, so it goes to a file for troubleshooting.
+            let outcome = match vdd::disable_monitor() {
+                Ok(count) => tr!("關閉時移除了 {count} 個虛擬螢幕", "Removed {count} virtual display(s) on exit"),
+                Err(e) => tr!("關閉時無法移除虛擬螢幕：{e}", "Could not remove the virtual display on exit: {e}"),
+            };
+            let _ = std::fs::write(padbridge_host::pairing::data_dir().join("vdd-exit.log"), outcome + "\n");
         }
     }
 }
